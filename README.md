@@ -257,7 +257,7 @@ We welcome contributions! If you'd like to improve this project:
 
 - 📧 Email: [Contact through GitHub Issues]
 - 🌐 Live Demo: [https://agribangla.streamlit.app/](https://agribangla.streamlit.app/)
-- 💻 Repository: [GitHub - AgriBangla](https://github.com/Your-Tribal-Chief/AgriBangla/)
+- 💻 Repository: [GitHub - MXB2026-Dhaka-Trio-Leveling-AgriSmartBD](https://github.com/Your-Tribal-Chief/MXB2026-Dhaka-Trio-Leveling-AgriSmartBD/)
 
 ---
 
