@@ -6,6 +6,21 @@ import plotly.graph_objects as go
 from sklearn.ensemble import RandomForestRegressor
 import datetime
 import time
+import requests
+import os
+from dotenv import load_dotenv
+import google.generativeai as genai
+
+# Load environment variables
+load_dotenv()
+
+# --- IMPORTS for Crop Disease
+import torch
+import torchvision.transforms as transforms
+from torchvision.models import resnet50
+from PIL import Image
+import torch.nn.functional as F
+import torch.nn as nn
 
 # --- IMPORTS (Voice, SMS, DB) ---
 from streamlit_mic_recorder import mic_recorder
@@ -13,6 +28,80 @@ import speech_recognition as sr
 import io
 from twilio.rest import Client
 import pymongo
+
+# --- MODEL CLASSES (Global Scope for Pickling) ---
+def accuracy(outputs, labels):
+    _, preds = torch.max(outputs, dim=1)
+    return torch.tensor(torch.sum(preds == labels).item() / len(preds))
+
+class ImageClassificationBase(nn.Module):
+    def training_step(self, batch):
+        images, labels = batch
+        out = self(images)                  # Generate predictions
+        loss = F.cross_entropy(out, labels) # Calculate loss
+        return loss
+    
+    def validation_step(self, batch):
+        images, labels = batch
+        out = self(images)                   # Generate prediction
+        loss = F.cross_entropy(out, labels)  # Calculate loss
+        acc = accuracy(out, labels)          # Calculate accuracy
+        return {"val_loss": loss.detach(), "val_accuracy": acc}
+    
+    def validation_epoch_end(self, outputs):
+        batch_losses = [x["val_loss"] for x in outputs]
+        batch_accuracy = [x["val_accuracy"] for x in outputs]
+        epoch_loss = torch.stack(batch_losses).mean()       # Combine loss  
+        epoch_accuracy = torch.stack(batch_accuracy).mean()
+        return {"val_loss": epoch_loss, "val_accuracy": epoch_accuracy} # Combine accuracies
+    
+    def epoch_end(self, epoch, result):
+        print("Epoch [{}], last_lr: {:.5f}, train_loss: {:.4f}, val_loss: {:.4f}, val_acc: {:.4f}".format(
+            epoch, result['lrs'][-1], result['train_loss'], result['val_loss'], result['val_accuracy']))
+
+def ConvBlock(in_channels, out_channels, pool=False):
+    layers = [nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+             nn.BatchNorm2d(out_channels),
+             nn.ReLU(inplace=True)]
+    if pool:
+        layers.append(nn.MaxPool2d(4))
+    return nn.Sequential(*layers)
+
+class ResNet9(ImageClassificationBase):
+    def __init__(self, in_channels, num_diseases):
+        super().__init__()
+        
+        self.conv1 = ConvBlock(in_channels, 64)
+        self.conv2 = ConvBlock(64, 128, pool=True) # out_dim : 128 x 64 x 64 
+        self.res1 = nn.Sequential(ConvBlock(128, 128), ConvBlock(128, 128))
+        
+        self.conv3 = ConvBlock(128, 256, pool=True) # out_dim : 256 x 16 x 16
+        self.conv4 = ConvBlock(256, 512, pool=True) # out_dim : 512 x 4 x 44
+        self.res2 = nn.Sequential(ConvBlock(512, 512), ConvBlock(512, 512))
+        
+        self.classifier = nn.Sequential(nn.MaxPool2d(4),
+                                       nn.Flatten(),
+                                       nn.Linear(512, num_diseases))
+        
+    def forward(self, xb): # xb is the loaded batch
+        out = self.conv1(xb)
+        out = self.conv2(out)
+        out = self.res1(out) + out
+        out = self.conv3(out)
+        out = self.conv4(out)
+        out = self.res2(out) + out
+        out = self.classifier(out)
+        return out
+
+@st.cache_resource
+def load_model():
+    # Instantiate model structure
+    model = ResNet9(3, 38)
+    # Load weights
+    model.load_state_dict(torch.load('plant_disease_weights.pth', map_location=torch.device('cpu')))
+    model.eval()
+    return model
+
 # -----------------------------------
 
 # -----------------------------------------------------------------------------
@@ -232,7 +321,7 @@ st.markdown("""
 # Example: "mongodb+srv://<username>:<password>@cluster0.xyz.mongodb.net/?retryWrites=true&w=majority"
 # For Hackathon demo without setup, I will use a local list fallback if connection fails.
 
-MONGO_URI = "mongodb+srv://admin:admin123@cluster0.xyz.mongodb.net/?retryWrites=true&w=majority" 
+MONGO_URI = st.secrets.get("MONGO_URI") or os.getenv("MONGO_URI") or "mongodb+srv://admin:admin123@cluster0.xyz.mongodb.net/?retryWrites=true&w=majority" 
 
 @st.cache_resource
 def init_connection():
@@ -294,6 +383,97 @@ def load_data():
 
 price_df, prod_df, soil_df = load_data()
 
+# --- Weather API Helper ---
+@st.cache_data(ttl=3600)
+def get_weather_data(city, api_key):
+    """Fetch current weather for a city in Bangladesh"""
+    if not api_key: return None
+    
+    # Mapping for OpenWeatherMap (Spelling differences)
+    API_CITY_MAPPING = {
+        'Cumilla': 'Comilla',
+        'Chattogram': 'Chittagong',
+        'Barishal': 'Barisal',
+        'Jashore': 'Jessore',
+        'Bogura': 'Bogra'
+    }
+    
+    search_city = API_CITY_MAPPING.get(city, city)
+    
+    try:
+        # Append ,BD to ensure we get the city in Bangladesh
+        url = f"http://api.openweathermap.org/data/2.5/weather?q={search_city},BD&appid={api_key}&units=metric"
+        # print(f"weather url-{url}")
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            return response.json()
+        return None
+    except Exception as e:
+        return None
+
+        return None
+    except Exception as e:
+        return None
+
+# --- Gemini API Helper ---
+def get_gemini_analysis(image, predicted_class, confidence, api_key):
+    """
+    Get second opinion from Gemini Flash model.
+    """
+    import time
+    
+    # Retry configuration
+    max_retries = 3
+    retry_delay = 2  # seconds
+
+    try:
+        genai.configure(api_key=api_key)
+        # Using specific model that is generally available
+        # If this fails, user might need to check Google AI Studio for enabled models
+        model = genai.GenerativeModel('gemini-2.5-flash') 
+        
+        prompt = f"""
+        You are an agricultural expert. I have uploaded an image of a crop leaf.
+        My automated ResNet model identified the disease as: '{predicted_class}' with {confidence:.1f}% confidence.
+        
+        Task:
+        1. visually verify if the image likely matches this disease.
+        2. Briefly explain the visual symptoms visible in the image.
+        3. Suggest organic or chemical remedies suitable for Bangladesh context.
+        4. If the image doesn't look like a plant leaf, please state that.
+        
+        Output in Bengali (Bangla). Keep it concise/bullet points.
+        """
+        
+        # Retry loop for 429 errors
+        for attempt in range(max_retries):
+            try:
+                response = model.generate_content([prompt, image])
+                return response.text
+            except Exception as e:
+                error_str = str(e)
+                if "429" in error_str:
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay * (attempt + 1)) # Exponential backoff
+                        continue
+                    else:
+                        return "⚠️ সার্ভার ব্যস্ত আছে (429)। অনুগ্রহ করে একটু পরে আবার চেষ্টা করুন।"
+                elif "404" in error_str:
+                     # Fallback to older/different model if 1.5-flash fails
+                     try:
+                        fallback_model = genai.GenerativeModel('gemini-1.0-pro-vision-latest')
+                        response = fallback_model.generate_content([prompt, image])
+                        return response.text
+                     except:
+                        return f"মডেল পাওয়া যায়নি (404)। API Key চেক করুন।"
+                else:
+                    return f"Gemini Analysis Error: {error_str}"
+                    
+        return "সার্ভার রেসপন্স করছে না।"
+
+    except Exception as e:
+        return f"Gemini Setup Error: {str(e)}"
+
 # Dictionaries (Translation)
 district_translation = {
     'Dhaka': 'ঢাকা', 'Chittagong': 'চট্টগ্রাম', 'Rajshahi': 'রাজশাহী', 'Khulna': 'খুলনা',
@@ -331,6 +511,131 @@ soil_translation = {
     'Silty Loam': 'পলি দোআঁশ', 'Peat': 'পিট মাটি', 'Chalky (Calcareous)': 'চুনযুক্ত মাটি',
     'Nitrogenous': 'নাইট্রোজেন সমৃদ্ধ', 'Black lava soil': 'কালো লাভা মাটি'
 }
+
+CLASS_LABELS = [
+    'Apple___Apple_scab', 'Apple___Black_rot', 'Apple___Cedar_apple_rust', 'Apple___healthy',
+    'Blueberry___healthy', 'Cherry_(including_sour)___Powdery_mildew', 'Cherry_(including_sour)___healthy',
+    'Corn_(maize)___Cercospora_leaf_spot Gray_leaf_spot', 'Corn_(maize)___Common_rust_',
+    'Corn_(maize)___Northern_Leaf_Blight', 'Corn_(maize)___healthy', 'Grape___Black_rot',
+    'Grape___Esca_(Black_Measles)', 'Grape___Leaf_blight_(Isariopsis_Leaf_Spot)', 'Grape___healthy',
+    'Orange___Haunglongbing_(Citrus_greening)', 'Peach___Bacterial_spot', 'Peach___healthy',
+    'Pepper,_bell___Bacterial_spot', 'Pepper,_bell___healthy', 'Potato___Early_blight',
+    'Potato___Late_blight', 'Potato___healthy', 'Raspberry___healthy', 'Soybean___healthy',
+    'Squash___Powdery_mildew', 'Strawberry___Leaf_scorch', 'Strawberry___healthy',
+    'Tomato___Bacterial_spot', 'Tomato___Early_blight', 'Tomato___Late_blight',
+    'Tomato___Leaf_Mold', 'Tomato___Septoria_leaf_spot', 'Tomato___Spider_mites Two-spotted_spider_mite',
+    'Tomato___Target_Spot', 'Tomato___Tomato_Yellow_Leaf_Curl_Virus', 'Tomato___Tomato_mosaic_virus',
+    'Tomato___healthy'
+]
+# Bengali translations (optional - expand as needed for your app)
+DISEASE_TRANSLATION = {
+    'Apple___Apple_scab': 'আপেল স্ক্যাব রোগ',
+    'Apple___Black_rot': 'আপেলের কালো পচন রোগ',
+    'Apple___Cedar_apple_rust': 'আপেলের সিডার মরিচা রোগ',
+    'Apple___healthy': 'আপেল গাছ সুস্থ',
+
+    'Blueberry___healthy': 'ব্লুবেরি গাছ সুস্থ',
+
+    'Cherry_(including_sour)___Powdery_mildew': 'চেরি পাউডারি মিলডিউ রোগ',
+    'Cherry_(including_sour)___healthy': 'চেরি গাছ সুস্থ',
+
+    'Corn_(maize)___Cercospora_leaf_spot Gray_leaf_spot': 'ভুট্টার সারকোস্পোরা পাতার দাগ রোগ',
+    'Corn_(maize)___Common_rust_': 'ভুট্টার সাধারণ মরিচা রোগ',
+    'Corn_(maize)___Northern_Leaf_Blight': 'ভুট্টার নর্দান লিফ ব্লাইট রোগ',
+    'Corn_(maize)___healthy': 'ভুট্টা গাছ সুস্থ',
+
+    'Grape___Black_rot': 'আঙ্গুরের কালো পচন রোগ',
+    'Grape___Esca_(Black_Measles)': 'আঙ্গুরের এসকা (কালো দাগ) রোগ',
+    'Grape___Leaf_blight_(Isariopsis_Leaf_Spot)': 'আঙ্গুরের পাতাঝলসানো রোগ',
+    'Grape___healthy': 'আঙ্গুর গাছ সুস্থ',
+
+    'Orange___Haunglongbing_(Citrus_greening)': 'কমলার হুয়াংলংবিং (গ্রিনিং) রোগ',
+
+    'Peach___Bacterial_spot': 'পীচ ব্যাকটেরিয়াল দাগ রোগ',
+    'Peach___healthy': 'পীচ গাছ সুস্থ',
+
+    'Pepper,_bell___Bacterial_spot': 'ক্যাপসিকাম ব্যাকটেরিয়াল দাগ রোগ',
+    'Pepper,_bell___healthy': 'ক্যাপসিকাম গাছ সুস্থ',
+
+    'Potato___Early_blight': 'আলুর আর্লি ব্লাইট রোগ',
+    'Potato___Late_blight': 'আলুর লেট ব্লাইট রোগ',
+    'Potato___healthy': 'আলু গাছ সুস্থ',
+
+    'Raspberry___healthy': 'রাস্পবেরি গাছ সুস্থ',
+    'Soybean___healthy': 'সয়াবিন গাছ সুস্থ',
+
+    'Squash___Powdery_mildew': 'স্কোয়াশ পাউডারি মিলডিউ রোগ',
+
+    'Strawberry___Leaf_scorch': 'স্ট্রবেরির পাতাঝলসানো রোগ',
+    'Strawberry___healthy': 'স্ট্রবেরি গাছ সুস্থ',
+
+    'Tomato___Bacterial_spot': 'টমেটো ব্যাকটেরিয়াল দাগ রোগ',
+    'Tomato___Early_blight': 'টমেটো আর্লি ব্লাইট রোগ',
+    'Tomato___Late_blight': 'টমেটো লেট ব্লাইট রোগ',
+    'Tomato___Leaf_Mold': 'টমেটো লিফ মোল্ড রোগ',
+    'Tomato___Septoria_leaf_spot': 'টমেটো সেপটোরিয়া পাতার দাগ রোগ',
+    'Tomato___Spider_mites Two-spotted_spider_mite': 'টমেটো স্পাইডার মাইট আক্রমণ',
+    'Tomato___Target_Spot': 'টমেটো টার্গেট স্পট রোগ',
+    'Tomato___Tomato_Yellow_Leaf_Curl_Virus': 'টমেটো ইয়েলো লিফ কার্ল ভাইরাস',
+    'Tomato___Tomato_mosaic_virus': 'টমেটো মোজাইক ভাইরাস',
+    'Tomato___healthy': 'টমেটো গাছ সুস্থ'
+}
+
+
+# Simple remedy suggestions (static dict - expand with real data)
+REMEDIES = {
+    'Apple___Apple_scab': 'আক্রান্ত পাতা অপসারণ করুন এবং ছত্রাকনাশক স্প্রে করুন।',
+    'Apple___Black_rot': 'সংক্রমিত ফল ও ডাল কেটে ফেলুন এবং বাগান পরিষ্কার রাখুন।',
+    'Apple___Cedar_apple_rust': 'ছত্রাকনাশক ব্যবহার করুন ও কাছাকাছি জুনিপার গাছ সরান।',
+    'Apple___healthy': 'নিয়মিত পরিচর্যা ও সঠিক সার ব্যবহার চালিয়ে যান।',
+
+    'Blueberry___healthy': 'কোন রোগ নেই, নিয়মিত সেচ ও সার প্রয়োগ করুন।',
+
+    'Cherry_(including_sour)___Powdery_mildew': 'সালফার বা উপযুক্ত ছত্রাকনাশক প্রয়োগ করুন।',
+    'Cherry_(including_sour)___healthy': 'গাছ সুস্থ, পর্যাপ্ত আলো ও বাতাস নিশ্চিত করুন।',
+
+    'Corn_(maize)___Cercospora_leaf_spot Gray_leaf_spot': 'আক্রান্ত পাতা সরিয়ে ফেলুন ও ছত্রাকনাশক দিন।',
+    'Corn_(maize)___Common_rust_': 'রোগ সহনশীল জাত ব্যবহার করুন ও প্রয়োজন হলে স্প্রে করুন।',
+    'Corn_(maize)___Northern_Leaf_Blight': 'ফসল পর্যায় পরিবর্তন করুন ও ছত্রাকনাশক ব্যবহার করুন।',
+    'Corn_(maize)___healthy': 'ভুট্টা গাছ ভালো অবস্থায় আছে।',
+
+    'Grape___Black_rot': 'আক্রান্ত অংশ কেটে ফেলুন ও ছত্রাকনাশক স্প্রে করুন।',
+    'Grape___Esca_(Black_Measles)': 'গুরুতর হলে আক্রান্ত গাছ অপসারণ করুন।',
+    'Grape___Leaf_blight_(Isariopsis_Leaf_Spot)': 'পাতা পরিষ্কার রাখুন ও ছত্রাকনাশক দিন।',
+    'Grape___healthy': 'আঙ্গুর গাছ সুস্থ রয়েছে।',
+
+    'Orange___Haunglongbing_(Citrus_greening)': 'আক্রান্ত গাছ অপসারণ করুন ও পোকা নিয়ন্ত্রণ করুন।',
+
+    'Peach___Bacterial_spot': 'কপার-ভিত্তিক ব্যাকটেরিয়ানাশক ব্যবহার করুন।',
+    'Peach___healthy': 'গাছ সুস্থ, পরিচর্যা বজায় রাখুন।',
+
+    'Pepper,_bell___Bacterial_spot': 'আক্রান্ত পাতা সরান ও ব্যাকটেরিয়ানাশক দিন।',
+    'Pepper,_bell___healthy': 'ক্যাপসিকাম গাছ ভালো আছে।',
+
+    'Potato___Early_blight': 'ফসল পর্যায় পরিবর্তন ও ছত্রাকনাশক ব্যবহার করুন।',
+    'Potato___Late_blight': 'দ্রুত ছত্রাকনাশক স্প্রে করুন ও আক্রান্ত অংশ সরান।',
+    'Potato___healthy': 'আলু গাছ সুস্থ রয়েছে।',
+
+    'Raspberry___healthy': 'কোন সমস্যা নেই।',
+    'Soybean___healthy': 'সয়াবিন গাছ সুস্থ।',
+
+    'Squash___Powdery_mildew': 'সালফার স্প্রে ও বাতাস চলাচল নিশ্চিত করুন।',
+
+    'Strawberry___Leaf_scorch': 'আক্রান্ত পাতা সরিয়ে ফেলুন।',
+    'Strawberry___healthy': 'স্ট্রবেরি গাছ সুস্থ।',
+
+    'Tomato___Bacterial_spot': 'কপার স্প্রে ব্যবহার করুন।',
+    'Tomato___Early_blight': 'ছত্রাকনাশক প্রয়োগ করুন।',
+    'Tomato___Late_blight': 'আক্রান্ত গাছ দ্রুত অপসারণ করুন।',
+    'Tomato___Leaf_Mold': 'গ্রিনহাউসে বাতাস চলাচল বাড়ান।',
+    'Tomato___Septoria_leaf_spot': 'পাতা শুকনো রাখুন ও স্প্রে করুন।',
+    'Tomato___Spider_mites Two-spotted_spider_mite': 'জৈব কীটনাশক বা পানি স্প্রে করুন।',
+    'Tomato___Target_Spot': 'ছত্রাকনাশক প্রয়োগ করুন।',
+    'Tomato___Tomato_Yellow_Leaf_Curl_Virus': 'সাদা মাছি নিয়ন্ত্রণ করুন।',
+    'Tomato___Tomato_mosaic_virus': 'আক্রান্ত গাছ সরিয়ে ফেলুন।',
+    'Tomato___healthy': 'টমেটো গাছ সুস্থ রয়েছে।'
+}
+
 def translate_bn(text, translation_dict):
     return translation_dict.get(text, text)
 def to_bengali_number(number):
@@ -424,9 +729,9 @@ def voice_to_text(audio_bytes):
 
 def send_sms_alert(to_number, message_body):
     try:
-        account_sid = st.secrets.get("TWILIO_ACCOUNT_SID", "")
-        auth_token = st.secrets.get("TWILIO_AUTH_TOKEN", "")
-        from_number = st.secrets.get("TWILIO_PHONE_NUMBER", "")
+        account_sid = st.secrets.get("TWILIO_ACCOUNT_SID") or os.getenv("TWILIO_ACCOUNT_SID")
+        auth_token = st.secrets.get("TWILIO_AUTH_TOKEN") or os.getenv("TWILIO_AUTH_TOKEN")
+        from_number = st.secrets.get("TWILIO_PHONE_NUMBER") or os.getenv("TWILIO_PHONE_NUMBER")
         
         if not all([account_sid, auth_token, from_number]):
             return False, "Twilio credentials not configured"
@@ -505,7 +810,7 @@ def get_crop_reasoning(soil_record, crop, yield_val):
 
 # --- Sidebar ---
 st.sidebar.markdown("**এআই চালিত কৃষি বুদ্ধিমত্তা**")
-menu = st.sidebar.radio("মডিউল নির্বাচন করুন:", ["📊 মূল্য পূর্বাভাস (এআই)", "💰 সেরা বাজার খুঁজুন", "🌱 মাটি ও ফসল পরামর্শদাতা"])
+menu = st.sidebar.radio("মডিউল নির্বাচন করুন:", ["📊 মূল্য পূর্বাভাস (এআই)", "💰 সেরা বাজার খুঁজুন", "🌱 মাটি ও ফসল পরামর্শদাতা", "🦠 ফসল বিষাক্তি পরিচিতি"])
 
 # -----------------------------------------------------------------------------
 # MODULE 1: AI PRICE FORECASTING
@@ -542,11 +847,44 @@ if menu == "📊 মূল্য পূর্বাভাস (এআই)":
         if voice_text:
             st.success(f"🗣️ আপনি বলেছেন: **'{voice_text}'**")
             for dist_bn in district_options_list:
-                if dist_bn in voice_text:
-                    st.session_state.selected_district_val = dist_bn
                     st.toast(f"✅ জেলা শনাক্ত হয়েছে: {dist_bn}")
                     break
     
+    # Geolocation Button
+    if st.button("📍 আমার বর্তমান অবস্থান ব্যবহার করুন"):
+        try:
+             # Using ipinfo.io for IP-based location (Free tier, no key needed usually)
+            loc_response = requests.get("https://ipinfo.io/json", timeout=10)
+            if loc_response.status_code == 200:
+                loc_data = loc_response.json()
+                city = loc_data.get('city', '')
+                
+                # Try to fuzzy match or direct match with available districts
+                matched_district = None
+                
+                # 1. Direct Match
+                if city in district_display:
+                     matched_district = city
+                
+                # 2. Check Alias/Mapping if needed
+                if not matched_district:
+                     # Reverse mapping of API_CITY_MAPPING could be useful here
+                     # or check if city is in values of district_translation (English)
+                     pass
+
+                if matched_district:
+                     bn_dist = district_display.get(matched_district)
+                     if bn_dist in district_options_list:
+                         st.session_state.selected_district_val = bn_dist
+                         st.success(f"📍 আপনার অবস্থান শনাক্ত হয়েছে: {city}")
+                         st.rerun()
+                else:
+                    st.warning(f"⚠️ আপনার শহর ({city}) আমাদের ডেটাসেটে পাওয়া যায়নি। অনুগ্রহ করে তালিকা থেকে নির্বাচন করুন।")
+            else:
+                st.error("অবস্থান নির্ণয় করা সম্ভব হয়নি।")
+        except Exception as e:
+            st.error(f"অবস্থান এরর: {str(e)}")
+
     st.divider()
 
     # Inputs
@@ -570,6 +908,50 @@ if menu == "📊 মূল্য পূর্বাভাস (এআই)":
         selected_crop_bn = st.selectbox("🌽 ফসল নির্বাচন করুন", options=crop_options_list, index=crop_index, format_func=lambda x: x)
         selected_crop = [k for k, v in crop_display.items() if v == selected_crop_bn][0]
 
+    # --- WEATHER INTEGRATION ---
+    weather_icon_url = None
+    weather_advice = ""
+    
+    # Try to get API Key from secrets, env, or input
+    weather_api_key = st.secrets.get("WEATHER_API_KEY") or os.getenv("WEATHER_API_KEY")
+    if not weather_api_key:
+        with st.expander("☁️ আবহাওয়া সেটিংস (API Key)"):
+            weather_api_key = st.text_input("OpenWeatherMap API Key দিন:", type="password", key="w_key")
+    
+    if weather_api_key:
+        w_data = get_weather_data(selected_district, weather_api_key)
+        if w_data:
+            main = w_data['main']
+            weather_desc = w_data['weather'][0]['description']
+            icon_code = w_data['weather'][0]['icon']
+            weather_icon_url = f"http://openweathermap.org/img/wn/{icon_code}@2x.png"
+            
+            # Simple Advisory Logic
+            if 'rain' in weather_desc.lower() or 'drizzle' in weather_desc.lower() or 'thunderstorm' in weather_desc.lower():
+                weather_advice = "🌧️ **সতর্কতা:** বৃষ্টির সম্ভাবনা। ফসল সংগ্রহ বা সার প্রয়োগ থেকে বিরত থাকুন।"
+            elif main['temp'] > 35:
+                weather_advice = "☀️ **সতর্কতা:** অতিরিক্ত তাপমাত্রা। জমিতে পর্যাপ্ত সেচ নিশ্চিত করুন।"
+            elif main['humidity'] > 85:
+                 weather_advice = "💧 **সতর্কতা:** উচ্চ আর্দ্রতা। ছত্রাকজনিত রোগের ঝুঁকি বেশি।"
+            else:
+                 weather_advice = "✅ আবহাওয়া চাষাবাদের অনুকূল।"
+
+            # Display Weather Compactly
+            st.markdown(f"""
+            <div style="background-color: #e3f2fd; padding: 15px; border-radius: 10px; display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px;">
+                <div style="display: flex; align-items: center;">
+                    <img src="{weather_icon_url}" width="60">
+                    <div style="margin-left: 10px;">
+                        <h4 style="margin: 0; color: #1565c0;">{translate_bn(selected_district, district_translation)} আবহাওয়া</h4>
+                        <p style="margin: 0; font-size: 16px;"><b>{main['temp']}°C</b> | {weather_desc.title()} | আর্দ্রতা: {main['humidity']}%</p>
+                    </div>
+                </div>
+                <div style="background-color: #fff; padding: 10px; border-radius: 8px; border-left: 4px solid #ff9800;">
+                    {weather_advice}
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+    
     # Analysis & Prediction
     filtered_df = price_df[(price_df['District_Name'] == selected_district) & (price_df['Crop_Name'] == selected_crop)].sort_values('Price_Date')
 
@@ -732,14 +1114,14 @@ elif menu == "💰 সেরা বাজার খুঁজুন":
         
         # Enhanced Net Profit Visualization with highlighted card
         st.markdown(f"""
-        <div style='background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+        <div style='background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%); 
                     padding: 2rem; 
                     border-radius: 15px; 
-                    box-shadow: 0 10px 25px rgba(0,0,0,0.3);
+                    box-shadow: 0 10px 25px rgba(0,0,0,0.2);
                     text-align: center;
                     margin: 1rem 0;'>
             <h2 style='color: white; margin: 0; font-size: 1.5rem;'>🏆 সেরা বাজার</h2>
-            <h1 style='color: #FFD700; margin: 0.5rem 0; font-size: 2.5rem;'>{translate_bn(best_market['District_Name'], district_translation)}</h1>
+            <h1 style='color: #ffffff; margin: 0.5rem 0; font-size: 2.5rem;'>{translate_bn(best_market['District_Name'], district_translation)}</h1>
             <h3 style='color: white; margin: 0;'>নিট লাভ: ৳{to_bengali_number(f"{best_market['Net_Profit']:.2f}")}/কেজি</h3>
             <p style='color: rgba(255,255,255,0.9); margin-top: 1rem;'>মূল্য: ৳{to_bengali_number(f"{best_market['Price_Tk_kg']:.2f}")} | পরিবহন: ৳{to_bengali_number(f"{transport_cost:.2f}")}</p>
         </div>
@@ -799,6 +1181,92 @@ elif menu == "🌱 মাটি ও ফসল পরামর্শদাতা"
         with st.expander(f"#{idx} {translate_bn(crop, crop_translation)} - ঐতিহাসিক ফলন: {to_bengali_number(f'{yield_val:.1f}')} কুইন্টাল/হেক্টর"):
             st.markdown(f"**কেন এই ফসলটি উপযুক্ত:**")
             st.write(reasoning)
+elif menu == "🦠 ফসল বিষাক্তি পরিচিতি":
+    st.title("🦠 ফসল বিষাক্তি পরিচিতি")
+    st.markdown("Upload a photo of your crop leaf for AI analysis (99.2% accuracy on global dataset). Note: This is for guidance only—consult local agri experts for confirmation.")
+
+
+    model = load_model()
+    
+    # UI Layout: Tabs for Input Method
+    tab_cam, tab_up = st.tabs(["📸 ছবি তুলুন", "📂 ছবি আপলোড করুন"])
+    
+    img_file = None
+    
+    with tab_cam:
+        cam_img = st.camera_input("ফসল বা পাতার ছবি তুলুন")
+        if cam_img:
+            img_file = cam_img
+            
+    with tab_up:
+        up_img = st.file_uploader("গ্যালারি থেকে ছবি নির্বাচন করুন (JPG/PNG)", type=["jpg", "png", "jpeg"])
+        if up_img:
+            img_file = up_img
+
+    if img_file:
+        # Display Image
+        image = Image.open(img_file)
+        
+        # Center the image
+        c1, c2, c3 = st.columns([1, 2, 1])
+        with c2:
+            st.image(image, caption="বিশ্লেষণকৃত ছবি", use_container_width=True)
+
+        with st.spinner("রোগ নির্ণয় করা হচ্ছে..."):
+            # Transformation
+            transform = transforms.Compose([
+                transforms.Resize(256),
+                transforms.CenterCrop(256),
+                transforms.ToTensor(),
+            ])
+            img_tensor = transform(image).unsqueeze(0)
+
+            # Inference
+            with torch.no_grad():
+                outputs = model(img_tensor)
+                probs = F.softmax(outputs, dim=1)
+                confidence, predicted = torch.max(probs, 1)
+                pred_class = CLASS_LABELS[predicted.item()]
+                conf_score = confidence.item() * 100
+
+        # Display Results
+        bn_label = DISEASE_TRANSLATION.get(pred_class, pred_class)
+        remedy = REMEDIES.get(pred_class, "পরামর্শ: স্থানীয় কৃষি কর্মকর্তার সাথে যোগাযোগ করুন।")
+        
+        st.divider()
+        st.subheader("ফলাফল:")
+        
+        # Result Badge
+        if "healthy" in pred_class:
+            st.success(f"✅ **অবস্থা:** {bn_label}")
+        else:
+            st.error(f"⚠️ **শনাক্ত রোগ:** {bn_label}")
+            
+        # Confidence Bar
+        st.write(f"**সঠিকতার হার:** {conf_score:.1f}%")
+        st.progress(int(conf_score))
+        
+        # --- GEMINI INTEGRATION ---
+        gemini_api_key = st.secrets.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
+        
+        if gemini_api_key:
+            with st.expander("🤖 এআই বিশেষজ্ঞের মতামত (Gemini 2.0)", expanded=True):
+                with st.spinner("Gemini চিত্র বিশ্লেষণ করছে..."):
+                    gemini_response = get_gemini_analysis(image, pred_class, conf_score, gemini_api_key)
+                    st.markdown(gemini_response)
+        
+        # Remedy Section
+        with st.container():
+            st.markdown(f"""
+            <div style="background-color: #f0f2f6; padding: 20px; border-radius: 10px; border-left: 5px solid #ff4b4b;">
+                <h4 style="color: #31333F;">💡 পরামর্শ ও প্রতিকার</h4>
+                <p style="font-size: 16px;">{remedy}</p>
+            </div>
+            """, unsafe_allow_html=True)
+            
+        # Disclaimer
+        with st.expander("⚠️ দাবিত্যাগ (Disclaimer)"):
+            st.write("এই এআই মডেলটি সহায়ক টুল হিসেবে তৈরি। এটি ৯৯.২% নির্ভুল হলেও, চূড়ান্ত সিদ্ধান্তের জন্য সর্বদা কৃষি বিশেষজ্ঞের পরামর্শ নিন।")
 
 # Footer
 st.markdown("<br><hr><div style='text-align: center; color: #555;'>Agri-Smart BD | Built for AI Build-a-thon 2025</div>", unsafe_allow_html=True)

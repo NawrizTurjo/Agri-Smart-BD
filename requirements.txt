@@ -7,3 +7,9 @@ streamlit-mic-recorder
 SpeechRecognition
 twilio
 pymongo
+torch
+torchvision
+pillow  # For image handling
+requests
+python-dotenv
+google-generativeai
