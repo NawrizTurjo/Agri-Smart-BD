@@ -18,3 +18,4 @@ transformers
 huggingface_hub
 opencv-python-headless
 tf_keras
+streamlit-js-eval

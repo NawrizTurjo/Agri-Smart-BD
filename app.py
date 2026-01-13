@@ -42,6 +42,7 @@ import speech_recognition as sr
 import io
 from twilio.rest import Client
 import pymongo
+from streamlit_js_eval import streamlit_js_eval
 
 # --- MODEL LOADING (Hugging Face - Offline) ---
 @st.cache_resource
@@ -1130,44 +1131,63 @@ if menu == "📊 মূল্য পূর্বাভাস (এআই)":
             voice_text = voice_to_text(audio['bytes'])
         if voice_text:
             st.success(f"🗣️ আপনি বলেছেন: **'{voice_text}'**")
-            for dist_bn in district_options_list:
-                    st.toast(f"✅ জেলা শনাক্ত হয়েছে: {dist_bn}")
-                    break
+            # Check if this voice command was already processed
+            prev_text = st.session_state.get('last_voice_text', "")
+            if voice_text != prev_text:
+                found_district = False
+                for dist_bn in district_options_list:
+                    if dist_bn in voice_text:
+                        st.session_state.selected_district_val = dist_bn
+                        st.session_state.last_voice_text = voice_text  # Mark as processed
+                        st.toast(f"✅ জেলা শনাক্ত হয়েছে: {dist_bn}")
+                        found_district = True
+                        break
+                
+                if not found_district:
+                    st.toast("⚠️ কোনো জেলা পাওয়া যায়নি", icon="⚠️")
+                    st.session_state.last_voice_text = voice_text # Mark as processed even if failed
     
     # Geolocation Button
+    # Geolocation Button (Client-Side for Deployed Apps)
     if st.button("📍 আমার বর্তমান অবস্থান ব্যবহার করুন"):
-        try:
-             # Using ipinfo.io for IP-based location (Free tier, no key needed usually)
-            loc_response = requests.get("https://ipinfo.io/json", timeout=10)
-            if loc_response.status_code == 200:
-                loc_data = loc_response.json()
-                city = loc_data.get('city', '')
-                
-                # Try to fuzzy match or direct match with available districts
-                matched_district = None
-                
-                # 1. Direct Match
-                if city in district_display:
-                     matched_district = city
-                
-                # 2. Check Alias/Mapping if needed
-                if not matched_district:
-                     # Reverse mapping of API_CITY_MAPPING could be useful here
-                     # or check if city is in values of district_translation (English)
-                     pass
-
-                if matched_district:
-                     bn_dist = district_display.get(matched_district)
-                     if bn_dist in district_options_list:
-                         st.session_state.selected_district_val = bn_dist
-                         st.success(f"📍 আপনার অবস্থান শনাক্ত হয়েছে: {city}")
-                         st.rerun()
+        st.session_state.finding_location = True
+    
+    if st.session_state.get('finding_location', False):
+        # execute js to get ip info from client side
+        with st.spinner("অবস্থান নির্ণয় করা হচ্ছে (Browser)..."):
+            loc_data = streamlit_js_eval(
+                js_expressions='fetch("https://ipinfo.io/json").then(response => response.json())', 
+                key = 'geo_fetch'
+            )
+            
+        if loc_data:
+            detected_city = loc_data.get('city', '').strip()
+            match_found_bn = None
+            
+            if detected_city:
+                 # 1. Direct key match
+                if detected_city in district_display:
+                    match_found_bn = district_display[detected_city]
                 else:
-                    st.warning(f"⚠️ আপনার শহর ({city}) আমাদের ডেটাসেটে পাওয়া যায়নি। অনুগ্রহ করে তালিকা থেকে নির্বাচন করুন।")
-            else:
-                st.error("অবস্থান নির্ণয় করা সম্ভব হয়নি।")
-        except Exception as e:
-            st.error(f"অবস্থান এরর: {str(e)}")
+                    # 2. Case-insensitive match
+                    for d_eng, d_bn in district_display.items():
+                        if d_eng.lower().strip() == detected_city.lower():
+                            match_found_bn = d_bn
+                            break
+            
+            if match_found_bn:
+                if match_found_bn in district_options_list:
+                    st.session_state.selected_district_val = match_found_bn
+                    st.toast(f"📍 আপনার অবস্থান শনাক্ত হয়েছে: {detected_city}")
+                    st.session_state.finding_location = False # Done
+                    time.sleep(0.5)
+                    st.rerun()
+                else:
+                    st.warning(f"⚠️ আপনার শহর ({detected_city}) আমাদের সেবার আওতাভুক্ত নয়।")
+                    st.session_state.finding_location = False
+            elif detected_city:
+                st.warning(f"⚠️ আপনার শহর ({detected_city}) ডেটাসেটে পাওয়া যায়নি।")
+                st.session_state.finding_location = False
 
     st.divider()
 
