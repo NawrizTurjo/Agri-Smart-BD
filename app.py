@@ -9,6 +9,11 @@ import time
 import requests
 import os
 from dotenv import load_dotenv
+import warnings
+# Suppress Google Generative AI and other FutureWarnings
+warnings.filterwarnings("ignore", category=FutureWarning, module="google.generativeai")
+warnings.filterwarnings("ignore", category=FutureWarning, module="keras.src.export.tf2onnx_lib")
+
 import google.generativeai as genai
 
 # Load environment variables
@@ -29,6 +34,7 @@ from tf_keras.models import load_model as load_keras_model
 from tensorflow.keras.applications.efficientnet import preprocess_input
 from PIL import Image, ImageOps
 import numpy as np
+import cv2 # For leaf detection filter
 
 # --- IMPORTS (Voice, SMS, DB) ---
 from streamlit_mic_recorder import mic_recorder
@@ -48,6 +54,54 @@ def load_plant_model():
     except Exception as e:
         st.error(f"Critical Error Loading Model: {e}")
         return None
+
+def is_likely_leaf(img_pil):
+    """
+    Advanced heuristic to check if image is a real leaf.
+    Checks:
+    1. Green Content (Color)
+    2. Texture/Pattern (Edges) - Rejects smooth green screens
+    """
+    try:
+        # Convert PIL to OpenCV format (RGB -> BGR)
+        img = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+        
+        # 1. Color Check (HSV)
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        lower_green = np.array([25, 40, 40])
+        upper_green = np.array([90, 255, 255])
+        mask = cv2.inRange(hsv, lower_green, upper_green)
+        
+        green_pixels = np.count_nonzero(mask)
+        total_pixels = img.shape[0] * img.shape[1]
+        green_ratio = green_pixels / total_pixels
+        
+        # 2. Texture Check (Canny Edge Detection)
+        # Real leaves have veins/texture; Green screens are smooth.
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        # Blur slightly to remove noise
+        gray_blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        edges = cv2.Canny(gray_blurred, 50, 150)
+        edge_pixels = np.count_nonzero(edges)
+        edge_ratio = edge_pixels / total_pixels
+        
+        # LOGIC:
+        # - Must be at least 15% green
+        # - Must have some texture (> 0.5% edges) to reject flat screens
+        
+        is_green = green_ratio > 0.15
+        has_texture = edge_ratio > 0.005 # 0.5% edge density
+        
+        if not is_green:
+             return False, f"⚠️ এটা পাতার ছবি মনে হচ্ছে না (সবুজের পরিমাণ: {green_ratio:.1%})। দয়া করে ফসলের বা পাতার স্পষ্ট ছবি দিন।"
+
+        # If it's green but super smooth (low edges), it's likely artificial
+        if is_green and not has_texture:
+            return False, f"⚠️ কৃত্রিম বা স্ক্রিন মনে হচ্ছে (সবুজের পরিমাণ: {green_ratio:.1%}, টেক্সচার: {edge_ratio:.1%})। আসল পাতার ছবি দিন।"
+            
+        return True, "Analysis Proceeding"
+    except Exception:
+        return True, "Error bypassed" # Fail safe
 
 # -----------------------------------
 
@@ -588,6 +642,47 @@ REMEDIES = {
     'Tomato___healthy': 'টমেটো গাছ সুস্থ রয়েছে।'
 }
 
+# Advanced Crop Preferences for Dynamic Reasoning
+# Advanced Crop Preferences for Dynamic Reasoning
+# Key: 'soil' (preferred types), 'ph_min', 'ph_max', 'water' (Low/Medium/High), 'desc' (Bangla tip)
+CROP_PREFERENCES = {
+    'Rice': {'soil': ['Clay', 'Silty Clay', 'Clay Loam'], 'ph_min': 5.5, 'ph_max': 8.0, 'water': 'High', 'desc': 'কাদামাটি ও প্রচুর পানি ধান চাষের জন্য অপরিহার্য।'},
+    'Wheat': {'soil': ['Loamy', 'Clay Loam', 'Silt'], 'ph_min': 6.0, 'ph_max': 7.5, 'water': 'Medium', 'desc': 'দোআঁশ মাটি গম চাষের জন্য সেরা।'},
+    'Jute': {'soil': ['Alluvial', 'Sandy Loam', 'Clay Loam'], 'ph_min': 5.0, 'ph_max': 8.0, 'water': 'High', 'desc': 'নদীর পলিযুক্ত মাটি পাট চাষের জন্য আদর্শ।'},
+    'Potato': {'soil': ['Sandy Loam', 'Loamy'], 'ph_min': 4.8, 'ph_max': 6.5, 'water': 'Medium', 'desc': 'আলুর জন্য ঝুরঝুরে মাটি প্রয়োজন যাতে শিকড় ছড়াতে পারে।'},
+    'Onion': {'soil': ['Sandy Loam', 'Silty Loam'], 'ph_min': 6.0, 'ph_max': 7.5, 'water': 'Medium', 'desc': 'পেঁয়াজের জন্য পানি নিষ্কাশন ব্যবস্থা ভালো হতে হবে।'},
+    'Garlic': {'soil': ['Loamy', 'Sandy Loam'], 'ph_min': 6.0, 'ph_max': 7.0, 'water': 'Medium', 'desc': 'রসুন চাষে মাটির রস ও ঝুরঝুরে ভাব জরুরি।'},
+    'Lentil': {'soil': ['Loamy', 'Clay Loam'], 'ph_min': 6.0, 'ph_max': 7.0, 'water': 'Low', 'desc': 'ডাল জাতীয় ফসল শুষ্ক আবহাওয়ায় ভালো হয়।'},
+    'Mustard': {'soil': ['Sandy Loam', 'Clay Loam'], 'ph_min': 6.0, 'ph_max': 7.5, 'water': 'Low', 'desc': 'সরিষা কম সেচেই ভালো ফলন দেয়।'},
+    'Tomato': {'soil': ['Loamy', 'Sandy Loam'], 'ph_min': 6.0, 'ph_max': 7.0, 'water': 'Medium', 'desc': 'টমেটোর জন্য উর্বর দোআঁশ মাটি ও রোদ দরকার।'},
+    'Eggplant': {'soil': ['Loamy', 'Clay Loam', 'Sandy Loam'], 'ph_min': 5.5, 'ph_max': 7.0, 'water': 'High', 'desc': 'বেগুনের জন্য প্রচুর জৈব সার ও সেচ প্রয়োজন।'},
+    'Chili': {'soil': ['Sandy Loam', 'Loamy'], 'ph_min': 6.0, 'ph_max': 7.0, 'water': 'Medium', 'desc': 'মরিচ গাছের গোড়ায় পানি জমলে ক্ষতি হয়।'},
+    'Chilli': {'soil': ['Sandy Loam', 'Loamy'], 'ph_min': 6.0, 'ph_max': 7.0, 'water': 'Medium', 'desc': 'মরিচ গাছের গোড়ায় পানি জমলে ক্ষতি হয়।'},
+    'Cabbage': {'soil': ['Clay Loam', 'Sandy Loam'], 'ph_min': 6.0, 'ph_max': 7.5, 'water': 'High', 'desc': 'বাঁধাকপির জন্য আর্দ্র ও ঠান্ডা আবহাওয়া ভালো।'},
+    'Cauliflower': {'soil': ['Loamy', 'Sandy Loam'], 'ph_min': 6.0, 'ph_max': 7.0, 'water': 'High', 'desc': 'ফুলকপি চাষে মাটির আর্দ্রতা রক্ষা করা জরুরি।'},
+    'Cucumber': {'soil': ['Sandy Loam', 'Loamy'], 'ph_min': 6.0, 'ph_max': 7.0, 'water': 'High', 'desc': 'শসা দ্রুত বর্ধনশীল, প্রচুর পানি ও জৈব সার প্রয়োজন।'},
+    'Pumpkin': {'soil': ['Sandy Loam', 'Loamy'], 'ph_min': 5.5, 'ph_max': 7.5, 'water': 'Medium', 'desc': 'কুমড়া চাষে পানি নিষ্কাশন ব্যবস্থা ভালো হতে হবে।'},
+    'Bitter Gourd': {'soil': ['Sandy Loam', 'Loamy'], 'ph_min': 6.0, 'ph_max': 7.0, 'water': 'Medium', 'desc': 'করলা চাষে মাচা পদ্ধতি ও জৈব সার ব্যবহার সেরা।'},
+    'Bottle Gourd': {'soil': ['Loamy', 'Sandy Loam'], 'ph_min': 6.0, 'ph_max': 7.5, 'water': 'Medium', 'desc': 'লাউ চাষে মাটির গভীরতা ও উর্বরতা গুরুত্বপূর্ণ।'},
+    'Okra': {'soil': ['Sandy Loam', 'Clay Loam'], 'ph_min': 6.0, 'ph_max': 6.8, 'water': 'Medium', 'desc': 'উষ্ণ আবহাওয়ায় ঢেঁড়স ভালো ফলন দেয়।'},
+    'Spinach': {'soil': ['Loamy', 'Sandy Loam'], 'ph_min': 6.0, 'ph_max': 7.0, 'water': 'Medium', 'desc': 'পালং শাক চাষে নাইট্রোজেন সমৃদ্ধ মাটি দরকার।'},
+    'Maize': {'soil': ['Loamy', 'Sandy Loam'], 'ph_min': 5.5, 'ph_max': 7.5, 'water': 'Medium', 'desc': 'ভুট্টা চাষে পানি যেন না জমে সেদিকে খেয়াল রাখুন।'},
+    'Sugarcane': {'soil': ['Loamy', 'Clay Loam'], 'ph_min': 6.5, 'ph_max': 7.5, 'water': 'High', 'desc': 'আখ চাষে দীর্ঘমেয়াদী আর্দ্রতা ও রোদ প্রয়োজন।'},
+    'Tea': {'soil': ['Sandy Loam', 'Acidic'], 'ph_min': 4.5, 'ph_max': 5.8, 'water': 'High', 'desc': 'চা চাষের জন্য অম্লীয় ও ঢালু জমি (পানি সরে যায় এমন) প্রয়োজন।'},
+    'Mango': {'soil': ['Loamy', 'Alluvial', 'Red Soil'], 'ph_min': 5.5, 'ph_max': 7.5, 'water': 'Medium', 'desc': 'গভীর ও সুনিষ্কাশিত মাটি আম বাগানের জন্য উপযোগী।'},
+    'Banana': {'soil': ['Loamy', 'Alluvial'], 'ph_min': 6.0, 'ph_max': 7.5, 'water': 'High', 'desc': 'উর্বর, আর্দ্র ও গভীর দোআঁশ মাটিতে কলা ভালো জন্মে।'},
+    'Jackfruit': {'soil': ['Loamy', 'Sandy Loam'], 'ph_min': 6.0, 'ph_max': 7.5, 'water': 'Medium', 'desc': 'কাঁঠাল উঁচু ও পানি জমে না এমন জমিতে ভালো হয়।'},
+    'Papaya': {'soil': ['Loamy', 'Sandy Loam'], 'ph_min': 6.0, 'ph_max': 7.0, 'water': 'Medium', 'desc': 'পেঁপে গাছের গোড়ায় পানি জমলে পচন রোগ হয়, নিষ্কাশন জরুরি।'},
+    'Guava': {'soil': ['Loamy', 'Alluvial'], 'ph_min': 4.5, 'ph_max': 8.2, 'water': 'Medium', 'desc': 'পেয়ারা সব ধরনের মাটিতেই মোটামুটি ভালো জন্মে।'},
+    'Lychee': {'soil': ['Deep Loamy', 'Alluvial'], 'ph_min': 6.0, 'ph_max': 7.0, 'water': 'High', 'desc': 'লিচু চাষে গভীর ও উর্বর দোআঁশ মাটি প্রয়োজন।'},
+    'Pineapple': {'soil': ['Sandy Loam', 'Laterite'], 'ph_min': 4.5, 'ph_max': 6.0, 'water': 'Medium', 'desc': 'অম্লীয় ও পাহাড়ি মাটিতে আনারস সবচেয়ে ভালো হয়।'},
+    'Watermelon': {'soil': ['Sandy', 'Sandy Loam'], 'ph_min': 6.0, 'ph_max': 7.0, 'water': 'Medium', 'desc': 'তরমুজ চাষে বেলে মাটি ও উষ্ণ আবহাওয়া দরকার।'},
+    'Cotton': {'soil': ['Black Clay', 'Loamy'], 'ph_min': 5.5, 'ph_max': 8.5, 'water': 'Low', 'desc': 'তুলা চাষে কালো মাটি ও শুষ্ক আবহাওয়া উপযোগী।'},
+    'Gram': {'soil': ['Sandy Loam', 'Clay Loam'], 'ph_min': 6.0, 'ph_max': 9.0, 'water': 'Low', 'desc': 'ছোলা কম উর্বর ও শুষ্ক মাটিতেও জন্মাতে পারে।'},
+    'Turmeric': {'soil': ['Loamy', 'Sandy Loam'], 'ph_min': 4.5, 'ph_max': 7.5, 'water': 'High', 'desc': 'হলুদ চাষে ছায়াযুক্ত স্যাঁতসেঁতে পরিবেশ এড়িয়ে চলুন।'},
+    'Ginger': {'soil': ['Loamy', 'Friable'], 'ph_min': 5.5, 'ph_max': 6.5, 'water': 'High', 'desc': 'আদা চাষে প্রচুর জৈব সার প্রয়োগ করুন।'}
+}
+
 def translate_bn(text, translation_dict):
     return translation_dict.get(text, text)
 def to_bengali_number(number):
@@ -726,39 +821,83 @@ def get_market_insights(df, current_district, current_crop, days_ahead=7):
 
 def get_crop_reasoning(soil_record, crop, yield_val):
     """
-    Generate reasoning for why a crop is recommended based on soil conditions
+    Generate diverse, crop-specific reasoning based on soil conditions.
     """
+    import random
+    
     soil_type = soil_record['Soil_Type']
     ph = soil_record['pH_Level']
     nitrogen = soil_record['Nitrogen_Content_kg_ha']
     organic = soil_record['Organic_Matter_Percent']
     
-    reasoning = f"এই অঞ্চলে {crop} চাষের ঐতিহাসিক সাফল্য রয়েছে। "
+    # 1. Base Reasoning (Crop Specific)
+    prefs = CROP_PREFERENCES.get(crop, {})
     
-    # pH-based reasoning
-    if 6.0 <= ph <= 7.5:
-        reasoning += "মাটির পিএইচ স্তর আদর্শ পরিসরে রয়েছে যা এই ফসলের জন্য উপযুক্ত। "
-    elif ph < 6.0:
-        reasoning += "মাটি কিছুটা অম্লীয় তবে এই ফসল তাতে মানানসই হতে পারে। "
+    reasons = []
+    
+    # Intro variations
+    intros = [
+        f"এই অঞ্চলের **{translate_bn(soil_type, soil_translation)}** {translate_bn(crop, crop_translation)} চাষের জন্য",
+        f"ঐতিহাসিকভাবে এখানে {translate_bn(crop, crop_translation)} ভালো হয় কারণ এখানকার **{translate_bn(soil_type, soil_translation)}**",
+        f"উপাত্ত বিশ্লেষণ বলছে, **{translate_bn(soil_type, soil_translation)}** থাকায় এই এলাকাটি {translate_bn(crop, crop_translation)} উৎপাদনে"
+    ]
+    
+    # Soil Suitability Check
+    is_soil_ideal = False
+    if prefs and 'soil' in prefs:
+        # Fuzzy match soil type
+        if any(s.lower() in soil_type.lower() for s in prefs['soil']):
+            reasons.append(f"{random.choice(intros)} অত্যন্ত উপযোগী।")
+            is_soil_ideal = True
+        else:
+            reasons.append(f"{random.choice(intros)} মোটামুটি মানানসই (বিশেষ যত্ন প্রয়োজন)।")
     else:
-        reasoning += "মাটি ক্ষারীয় প্রকৃতির, তবে এই ফসল তাতে ভালো জন্মায়। "
-    
-    # Nitrogen content reasoning
+        # Fallback for unknown crops
+        reasons.append(f"এই এলাকার আবহাওয়া এবং মাটি {translate_bn(crop, crop_translation)} চাষের অনুকূল।")
+
+    # 2. Specific Crop Insight (The "Why")
+    if prefs.get('desc'):
+         reasons.append(f"💡 **বিশেষ নোট:** {prefs['desc']}")
+
+    # 3. Nitrogen Analysis (Dynamic)
     if nitrogen > 150:
-        reasoning += "উচ্চ নাইট্রোজেন সামগ্রী ফসলের বৃদ্ধিতে সহায়ক। "
-    elif nitrogen > 100:
-        reasoning += "মাঝারি নাইট্রোজেন স্তর পর্যাপ্ত। "
-    else:
-        reasoning += "নাইট্রোজেন সার প্রয়োগ বিবেচনা করুন। "
+        if crop in ['Rice', 'Corn', 'Wheat', 'Sugarcane', 'Tea', 'Mustard']: # High N consumers
+            reasons.append(f"✅ মাটিতে প্রচুর নাইট্রোজেন ({nitrogen:.1f} kg/ha) আছে যা এই ফসলের দ্রুত বৃদ্ধিতে সাহায্য করবে।")
+        else: # Legumes (Lentil, Gram) fix their own N
+             reasons.append(f"⚠️ মাটিতে নাইট্রোজেন অনেক বেশি ({nitrogen:.1f} kg/ha); অতিরিক্ত সার দেবেন না।")
+    elif nitrogen < 100:
+        if crop in ['Lentil', 'Gram', 'Peas', 'Soybean']:
+            reasons.append(f"✅ কম নাইট্রোজেন সমস্যা নয়, কারণ এটি ডাল জাতীয় ফসল যা নিজেই নাইট্রোজেন তৈরি করে।")
+        else:
+            reasons.append(f"⚠️ নাইট্রোজেনের ঘাটতি ({nitrogen:.1f} kg/ha) আছে; ইউরিয়া সার প্রয়োগ জরুরি।")
+
+    # 4. pH Analysis
+    if prefs:
+        min_ph, max_ph = prefs.get('ph_min', 5.5), prefs.get('ph_max', 7.5)
+        if min_ph <= ph <= max_ph:
+            reasons.append(f"✅ মাটির পিএইচ ({ph:.1f}) একদম যথার্থ স্তরে আছে।")
+        elif ph < min_ph:
+            reasons.append(f"⚠️ মাটি কিছুটা বেশি অম্লীয় ({ph:.1f}); চুন প্রয়োগে ফলন বাড়তে পারে।")
+        else:
+            reasons.append(f"⚠️ মাটি কিছুটা ক্ষারীয় ({ph:.1f}); জিপসাম ব্যবহারে উপকার হতে পারে।")
+
+    # 5. Water/Irrigation Logic (New)
+    water_req = prefs.get('water', 'Medium')
+    if water_req == 'High':
+        if 'Clay' in soil_type:
+             reasons.append(f"💧 **সেচ পরামর্শ:** এই ফসলটির প্রচুর পানি প্রয়োজন এবং এখানকার কাদামাটি পানি ধরে রাখতে সক্ষম, যা একটি বড় সুবিধা।")
+        elif 'Sandy' in soil_type:
+             reasons.append(f"⚠️ **সেচ সতর্কতা:** এই ফসলের প্রচুর পানি লাগে কিন্তু বেলে মাটি পানি ধরে রাখতে পারে না। ঘন ঘন সেচ দিতে হবে।")
+        else:
+             reasons.append(f"💧 **সেচ:** ফলন ভালো পেতে নিয়মিত সেচ নিশ্চিত করুন।")
+    elif water_req == 'Low' and 'Clay' in soil_type:
+         reasons.append(f"⚠️ **সতর্কতা:** এই ফসলের কম পানি লাগে কিন্তু কাদামাটিতে পানি জমলে শিকড় পচে যেতে পারে। নিষ্কাশন নালা তৈরি করুন।")
+
+    # 6. Yield/Success Projection (Conclusion)
+    yield_desc = "খুবই ভালো" if yield_val > 40 else "সন্তোষজনক"
+    reasons.append(f"📈 **প্রত্যাশিত ফলাফল:** হেক্টর প্রতি প্রায় **{to_bengali_number(f'{yield_val:.1f}')}** কুইন্টাল ফলন সম্ভব, যা {yield_desc}।")
     
-    # Organic matter reasoning
-    if organic > 2.0:
-        reasoning += f"উচ্চ জৈব পদার্থ ({organic:.1f}%) মাটির উর্বরতা নিশ্চিত করে। "
-    
-    # Yield-based reasoning
-    reasoning += f"ঐতিহাসিক তথ্য অনুযায়ী, গড় ফলন {yield_val:.1f} কুইন্টাল/হেক্টর অর্জন করা সম্ভব।"
-    
-    return reasoning
+    return "\n\n".join(reasons)
 
 # --- Sidebar ---
 st.sidebar.markdown("**এআই চালিত কৃষি বুদ্ধিমত্তা**")
@@ -931,7 +1070,8 @@ if menu == "📊 মূল্য পূর্বাভাস (এআই)":
         predictions = model.predict(future_data[['Date_Ordinal', 'Month', 'Week', 'Year']])
         
         # Calculate confidence intervals using tree predictions
-        tree_predictions = np.array([tree.predict(future_data[['Date_Ordinal', 'Month', 'Week', 'Year']]) for tree in model.estimators_])
+        # Fix: Pass numpy array (.values) to tree.predict to avoid "Feature names" warning
+        tree_predictions = np.array([tree.predict(future_data[['Date_Ordinal', 'Month', 'Week', 'Year']].values) for tree in model.estimators_])
         std_predictions = tree_predictions.std(axis=0)
         
         future_data['Predicted_Price'] = predictions
@@ -1165,6 +1305,13 @@ elif menu == "🦠 ফসল বিষাক্তি পরিচিতি":
         c1, c2, c3 = st.columns([1, 2, 1])
         with c2:
             st.image(image, caption="বিশ্লেষণকৃত ছবি", use_container_width=True)
+
+        # Step 1: Leaf Detection Filter
+        is_leaf, msg = is_likely_leaf(image)
+        if not is_leaf:
+            st.warning(msg)
+            st.info("টিপস: ছবিটি উজ্জ্বল আলোতে তুলুন এবং ব্যাকগ্রাউন্ডে যেন পাতা থাকে তা নিশ্চিত করুন।")
+            st.stop() # Stop further processing
 
         with st.spinner("রোগ নির্ণয় করা হচ্ছে (EfficientNetB4)..."):
             try:

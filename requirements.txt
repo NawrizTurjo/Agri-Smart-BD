@@ -16,4 +16,5 @@ google-generativeai
 tensorflow
 transformers
 huggingface_hub
+opencv-python-headless
 tf_keras
