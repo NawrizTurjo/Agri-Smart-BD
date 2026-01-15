@@ -1265,6 +1265,59 @@ def get_market_insights(df, current_district, current_crop, days_ahead=7):
         insights['best_districts_for_crop'] = insights['best_districts_for_crop'][:3]
         
     return insights
+    
+# --- Price Prediction Helper (Refactored) ---
+@st.cache_data(ttl=3600)
+def predict_next_30_days(district, crop, _df):
+    """
+    Predicts daily prices for the next 30 days for a given district and crop using RandomForest.
+    Returns:
+        avg_predicted_price (float): Mean of the 30-day predictions.
+        future_data (pd.DataFrame): DataFrame containing dates, predicted prices, and confidence intervals.
+        historical_data (pd.DataFrame): The filtered historical data used for training (for plotting).
+    """
+    # Filter data
+    filtered_df = _df[(_df['District_Name'] == district) & (_df['Crop_Name'] == crop)].sort_values('Price_Date')
+    
+    if len(filtered_df) < 10:
+        return None, None, None
+
+    # Feature Engineering
+    filtered_df['Date_Ordinal'] = filtered_df['Price_Date'].map(datetime.datetime.toordinal)
+    filtered_df['Month'] = filtered_df['Price_Date'].dt.month
+    filtered_df['Week'] = filtered_df['Price_Date'].dt.isocalendar().week
+    filtered_df['Year'] = filtered_df['Price_Date'].dt.year
+    
+    X = filtered_df[['Date_Ordinal', 'Month', 'Week', 'Year']]
+    y = filtered_df['Price_Tk_kg']
+    
+    # Train Model
+    model = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
+    model.fit(X, y)
+    
+    # Prepare Future Data
+    last_date = filtered_df['Price_Date'].max()
+    future_dates = [last_date + datetime.timedelta(days=i) for i in range(1, 31)]
+    future_data = pd.DataFrame({'Price_Date': future_dates})
+    future_data['Date_Ordinal'] = future_data['Price_Date'].map(datetime.datetime.toordinal)
+    future_data['Month'] = future_data['Price_Date'].dt.month
+    future_data['Week'] = future_data['Price_Date'].dt.isocalendar().week
+    future_data['Year'] = future_data['Price_Date'].dt.year
+    
+    # Get predictions
+    predictions = model.predict(future_data[['Date_Ordinal', 'Month', 'Week', 'Year']])
+    
+    # Confidence Intervals
+    tree_predictions = np.array([tree.predict(future_data[['Date_Ordinal', 'Month', 'Week', 'Year']].values) for tree in model.estimators_])
+    std_predictions = tree_predictions.std(axis=0)
+    
+    future_data['Predicted_Price'] = predictions
+    future_data['Upper_Bound'] = predictions + 1.96 * std_predictions
+    future_data['Lower_Bound'] = predictions - 1.96 * std_predictions
+    
+    avg_predicted_price = predictions.mean()
+    
+    return avg_predicted_price, future_data, filtered_df
 
 def get_crop_reasoning(soil_record, crop, yield_val):
     """
@@ -1396,6 +1449,53 @@ if 'current_module' not in st.session_state:
 def update_from_sidebar():
     st.session_state.current_module = st.session_state.nav_sidebar
 
+
+def process_voice_command(voice_text, district_names=None, crop_names=None, district_key=None, crop_key=None):
+    """
+    Process voice text to find district and crop names.
+    Updates session state keys if matches are found.
+    Returns: True if any update occurred, False otherwise.
+    """
+    if not voice_text: return False
+    
+    updated = False
+    
+    # Check for District
+    if district_names and district_key:
+        found_dist = None
+        # Try finding exact match first, then partial
+        for dist_bn in district_names:
+            if dist_bn in voice_text:
+                found_dist = dist_bn
+                break
+        
+        if found_dist:
+            # Only update if different
+            current_val = st.session_state.get(district_key)
+            if current_val != found_dist:
+                st.session_state[district_key] = found_dist
+                st.toast(f"✅ জেলা শনাক্ত হয়েছে: {found_dist}")
+                updated = True
+    
+    # Check for Crop
+    if crop_names and crop_key:
+        found_crop = None
+        for crop_bn in crop_names:
+            if crop_bn in voice_text:
+                found_crop = crop_bn
+                break
+        
+        if found_crop:
+            current_val = st.session_state.get(crop_key)
+            # Find the option that matches this crop name (since selectbox might use format_func, but key stores the value)
+            # Assuming the key stores the Bengali name directly for these specific selectboxes as per app structure
+            if current_val != found_crop:
+                 st.session_state[crop_key] = found_crop
+                 st.toast(f"✅ ফসল শনাক্ত হয়েছে: {found_crop}")
+                 updated = True
+
+    return updated
+    
 def update_from_mobile(key):
     st.session_state.current_module = st.session_state[key]
 
@@ -1643,18 +1743,19 @@ if menu == "📊 মূল্য পূর্বাভাস (এআই)":
             # Check if this voice command was already processed
             prev_text = st.session_state.get('last_voice_text', "")
             if voice_text != prev_text:
-                found_district = False
-                for dist_bn in district_options_list:
-                    if dist_bn in voice_text:
-                        st.session_state.selected_district_val = dist_bn
-                        st.session_state.last_voice_text = voice_text  # Mark as processed
-                        st.toast(f"✅ জেলা শনাক্ত হয়েছে: {dist_bn}")
-                        found_district = True
-                        break
+                updated = process_voice_command(
+                    voice_text, 
+                    district_names=district_options_list, 
+                    district_key='selected_district_val'
+                )
                 
-                if not found_district:
+                st.session_state.last_voice_text = voice_text # Mark processed
+                
+                if updated:
+                    time.sleep(1)
+                    st.rerun()
+                elif not any(d in voice_text for d in district_options_list):
                     st.toast("⚠️ কোনো জেলা পাওয়া যায়নি", icon="⚠️")
-                    st.session_state.last_voice_text = voice_text # Mark as processed even if failed
     
     # Legacy Geolocation logic removed
 
@@ -1752,48 +1853,18 @@ if menu == "📊 মূল্য পূর্বাভাস (এআই)":
             pass
     
     # Analysis & Prediction
-    filtered_df = price_df[(price_df['District_Name'] == selected_district) & (price_df['Crop_Name'] == selected_crop)].sort_values('Price_Date')
+    # Analysis & Prediction
+    avg_pred_price, future_df, hist_df = predict_next_30_days(selected_district, selected_crop, price_df)
 
-    if len(filtered_df) > 10:
-        # Feature Engineering
-        filtered_df['Date_Ordinal'] = filtered_df['Price_Date'].map(datetime.datetime.toordinal)
-        filtered_df['Month'] = filtered_df['Price_Date'].dt.month
-        filtered_df['Week'] = filtered_df['Price_Date'].dt.isocalendar().week
-        filtered_df['Year'] = filtered_df['Price_Date'].dt.year
-        
-        X = filtered_df[['Date_Ordinal', 'Month', 'Week', 'Year']]
-        y = filtered_df['Price_Tk_kg']
-        model = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
-        model.fit(X, y)
-        
-        last_date = filtered_df['Price_Date'].max()
-        future_dates = [last_date + datetime.timedelta(days=i) for i in range(1, 31)]
-        future_data = pd.DataFrame({'Price_Date': future_dates})
-        future_data['Date_Ordinal'] = future_data['Price_Date'].map(datetime.datetime.toordinal)
-        future_data['Month'] = future_data['Price_Date'].dt.month
-        future_data['Week'] = future_data['Price_Date'].dt.isocalendar().week
-        future_data['Year'] = future_data['Price_Date'].dt.year
-        
-        # Get predictions with confidence intervals
-        predictions = model.predict(future_data[['Date_Ordinal', 'Month', 'Week', 'Year']])
-        
-        # Calculate confidence intervals using tree predictions
-        # Fix: Pass numpy array (.values) to tree.predict to avoid "Feature names" warning
-        tree_predictions = np.array([tree.predict(future_data[['Date_Ordinal', 'Month', 'Week', 'Year']].values) for tree in model.estimators_])
-        std_predictions = tree_predictions.std(axis=0)
-        
-        future_data['Predicted_Price'] = predictions
-        future_data['Upper_Bound'] = predictions + 1.96 * std_predictions
-        future_data['Lower_Bound'] = predictions - 1.96 * std_predictions
-        
+    if future_df is not None:
         # Plot with confidence intervals
         st.subheader(f"মূল্য প্রবণতা: {translate_bn(selected_crop, crop_translation)}")
         fig = go.Figure()
         
         # Historical data
         fig.add_trace(go.Scatter(
-            x=filtered_df['Price_Date'], 
-            y=filtered_df['Price_Tk_kg'], 
+            x=hist_df['Price_Date'], 
+            y=hist_df['Price_Tk_kg'], 
             mode='lines', 
             name='ঐতিহাসিক', 
             line=dict(color='#1f77b4', width=2)
@@ -1801,8 +1872,8 @@ if menu == "📊 মূল্য পূর্বাভাস (এআই)":
         
         # Predicted data
         fig.add_trace(go.Scatter(
-            x=future_data['Price_Date'], 
-            y=future_data['Predicted_Price'], 
+            x=future_df['Price_Date'], 
+            y=future_df['Predicted_Price'], 
             mode='lines', 
             name='পূর্বাভাস', 
             line=dict(color='#00cc96', width=2)
@@ -1810,8 +1881,8 @@ if menu == "📊 মূল্য পূর্বাভাস (এআই)":
         
         # Confidence interval upper bound
         fig.add_trace(go.Scatter(
-            x=future_data['Price_Date'],
-            y=future_data['Upper_Bound'],
+            x=future_df['Price_Date'],
+            y=future_df['Upper_Bound'],
             mode='lines',
             name='উর্ধ্ব সীমা',
             line=dict(width=0),
@@ -1821,8 +1892,8 @@ if menu == "📊 মূল্য পূর্বাভাস (এআই)":
         
         # Confidence interval lower bound with fill
         fig.add_trace(go.Scatter(
-            x=future_data['Price_Date'],
-            y=future_data['Lower_Bound'],
+            x=future_df['Price_Date'],
+            y=future_df['Lower_Bound'],
             mode='lines',
             name='নিম্ন সীমা',
             line=dict(width=0),
@@ -1840,14 +1911,15 @@ if menu == "📊 মূল্য পূর্বাভাস (এআই)":
         
         st.plotly_chart(fig, use_container_width=True)
 
-        current_price = filtered_df.iloc[-1]['Price_Tk_kg']
-        avg_price = predictions.mean()
+        current_price = hist_df.iloc[-1]['Price_Tk_kg']
+        avg_price = avg_pred_price
         trend = "উর্ধ্বমুখী 📈" if avg_price > current_price else "নিম্নমুখী 📉"
         
         m1, m2, m3 = st.columns(3)
         m1.metric("বর্তমান মূল্য", f"৳ {to_bengali_number(f'{current_price:.2f}')}")
         m2.metric("গড় পূর্বাভাস", f"৳ {to_bengali_number(f'{avg_price:.2f}')}")
         m3.metric("প্রবণতা", trend)
+
 
         # SMS Alert Section (Personalized)
         st.markdown("---")
@@ -1899,7 +1971,32 @@ elif menu == "💰 সেরা বাজার খুঁজুন":
 
     all_crops = sorted(price_df['Crop_Name'].unique())
     all_crops_display = {crop: translate_bn(crop, crop_translation) for crop in all_crops}
-    target_crop_bn = st.selectbox("🔍 ফসল নির্বাচন করুন", options=list(all_crops_display.values()))
+    
+    # Session state for target crop
+    if 'target_crop_bn' not in st.session_state:
+        st.session_state.target_crop_bn = list(all_crops_display.values())[0]
+
+    # Voice Input
+    c1, c2 = st.columns([1, 4])
+    with c1:
+        audio = mic_recorder(start_prompt="🎤 বলুন", stop_prompt="🛑 থামুন", key='rec_best_market', format="wav", use_container_width=True)
+    
+    if audio:
+        voice_text = voice_to_text(audio['bytes'])
+        if voice_text:
+            st.success(f"🗣️: **'{voice_text}'**")
+            updated = process_voice_command(
+                voice_text, 
+                crop_names=list(all_crops_display.values()), 
+                crop_key='target_crop_bn'
+            )
+            if updated:
+                time.sleep(0.5)
+                st.rerun()
+            elif not any(c in voice_text for c in list(all_crops_display.values())):
+                 st.toast("⚠️ কোনো ফসল পাওয়া যায়নি", icon="⚠️")
+
+    target_crop_bn = st.selectbox("🔍 ফসল নির্বাচন করুন", options=list(all_crops_display.values()), key='target_crop_bn')
     target_crop = [k for k, v in all_crops_display.items() if v == target_crop_bn][0]
 
     transport_cost = st.number_input("পরিবহন খরচ (টাকা/কেজি)", min_value=0.0, value=2.0)
@@ -1958,7 +2055,30 @@ elif menu == "🌱 মাটি ও ফসল পরামর্শদাতা"
         if u_dist in vals:
             default_idx = vals.index(u_dist)
 
-    target_district_bn = st.selectbox("📍 অবস্থান নির্বাচন করুন", options=list(soil_district_display.values()), index=default_idx)
+    if 'target_district_bn_soil' not in st.session_state:
+        st.session_state.target_district_bn_soil = list(soil_district_display.values())[default_idx]
+
+    # Voice Input
+    c1, c2 = st.columns([1, 4])
+    with c1:
+        audio = mic_recorder(start_prompt="🎤 বলুন", stop_prompt="🛑 থামুন", key='rec_soil', format="wav", use_container_width=True)
+    
+    if audio:
+        voice_text = voice_to_text(audio['bytes'])
+        if voice_text:
+            st.success(f"🗣️: **'{voice_text}'**")
+            updated = process_voice_command(
+                voice_text, 
+                district_names=list(soil_district_display.values()), 
+                district_key='target_district_bn_soil'
+            )
+            if updated:
+                time.sleep(0.5)
+                st.rerun()
+            elif not any(d in voice_text for d in list(soil_district_display.values())):
+                 st.toast("⚠️ কোনো জেলা পাওয়া যায়নি", icon="⚠️")
+
+    target_district_bn = st.selectbox("📍 অবস্থান নির্বাচন করুন", options=list(soil_district_display.values()), index=default_idx, key='target_district_bn_soil')
     target_district = [k for k, v in soil_district_display.items() if v == target_district_bn][0]
 
     soil_record = soil_df[soil_df['District_Name'] == target_district].iloc[0]
@@ -2136,15 +2256,34 @@ elif menu == "📊 এগ্রি-ফাইন্যান্স ও লাভ 
         # District Selection
         district_list = sorted(price_df['District_Name'].unique())
         district_display = {dist: translate_bn(dist, district_translation) for dist in district_list}
-        f_district_bn = st.selectbox("জেলা নির্বাচন করুন", options=list(district_display.values()), key="f_dist")
-        f_district = [k for k, v in district_display.items() if v == f_district_bn][0]
         
         # Crop Selection
         all_crops = sorted(price_df['Crop_Name'].unique())
         all_crops_display = {crop: translate_bn(crop, crop_translation) for crop in all_crops}
+
+        # Voice Input (PROCESSED BEFORE WIDGETS)
+        audio = mic_recorder(start_prompt="🎤 বলুন", stop_prompt="🛑 থামুন", key='rec_calc', format="wav", use_container_width=True)
+        if audio:
+            voice_text = voice_to_text(audio['bytes'])
+            if voice_text:
+                st.success(f"🗣️: **'{voice_text}'**")
+                updated = process_voice_command(
+                    voice_text, 
+                    district_names=list(district_display.values()), 
+                    crop_names=list(all_crops_display.values()),
+                    district_key="f_dist",
+                    crop_key="f_crop"
+                )
+                if updated:
+                    time.sleep(0.5)
+                    st.rerun()
+
+        f_district_bn = st.selectbox("জেলা নির্বাচন করুন", options=list(district_display.values()), key="f_dist")
+        f_district = [k for k, v in district_display.items() if v == f_district_bn][0]
+        
         f_crop_bn = st.selectbox("ফসল নির্বাচন করুন", options=list(all_crops_display.values()), key="f_crop")
         f_crop = [k for k, v in all_crops_display.items() if v == f_crop_bn][0]
-        
+
         # Land Size
         land_amount = st.number_input("জমির পরিমাণ (শতাংশ/ডেসিমেল)", min_value=1.0, value=33.0, step=1.0)
     
@@ -2164,12 +2303,21 @@ elif menu == "📊 এগ্রি-ফাইন্যান্স ও লাভ 
         expected_yield_per_dec = st.number_input("প্রত্যাশিত ফলন (কেজি/শতাংশ)", min_value=1.0, value=float(round(default_yield_kg_dec, 2)))
         
         # Price Estimation
+        # Price Estimation
         # Get latest average price
-        latest_price_date = price_df['Price_Date'].max()
-        recent_prices = price_df[(price_df['Crop_Name'] == f_crop) & (price_df['Price_Date'] >= latest_price_date - datetime.timedelta(days=30))]
-        default_price = recent_prices['Price_Tk_kg'].mean() if not recent_prices.empty else 20.0
         
-        estimated_price = st.number_input("সম্ভাব্য বিক্রয় মূল্য (টাকা/কেজি)", min_value=1.0, value=float(round(default_price, 2)))
+        # Use AI Prediction if available
+        pred_avg, _, _ = predict_next_30_days(f_district, f_crop, price_df)
+        
+        if pred_avg:
+             default_price = pred_avg
+        else:
+             # Fallback to historical mean
+             latest_price_date = price_df['Price_Date'].max()
+             recent_prices = price_df[(price_df['Crop_Name'] == f_crop) & (price_df['Price_Date'] >= latest_price_date - datetime.timedelta(days=30))]
+             default_price = recent_prices['Price_Tk_kg'].mean() if not recent_prices.empty else 20.0
+        
+        estimated_price = st.number_input("সম্ভাব্য বিক্রয় মূল্য (টাকা/কেজি)", min_value=1.0, value=float(round(default_price, 2)), help="AI দ্বারা পূর্বাভাসকৃত ৩০ দিনের গড় মূল্য (ডিফল্ট)")
 
     # 2. Generate Report
     if st.button("📄 রিপোর্ট তৈরি করুন", type="primary", use_container_width=True):
