@@ -46,18 +46,39 @@ In Bangladesh, farmers face a critical information gap:
 - **Reasoning Engine:** Explains why certain crops are recommended
 - **Regional Adaptation:** District-specific crop performance insights
 
-### 📲 SMS Alert System (Planned)
+### 🦠 AI Plant Disease Detection & Doctor
 
-- **Feature Phone Support:** Designed for farmers without smartphones
-- **Price Alerts:** Daily updates on crop prices
-- **Market Recommendations:** SMS-based guidance
-- **Current Status:** Mockup version (awaiting funding for SMS gateway integration)
+- **Image Recognition:** ResNet-based model with 99.2% accuracy
+- **Instant Diagnosis:** Identifies 38 distinct plant diseases
+- **Digital Prescription:** AI Doctor suggests specific medicines and dosage
+- **Notebook:** Trained using `plant-disease-classification-99-2.ipynb`
+- **Offline Capability:** Works without constant internet connection
+
+### 🌦️ Pin-Point Weather & Disaster Alerts
+
+- **GPS Integration:** Real-time location-based weather data
+- **Disaster Advice:** Red/Orange/Green alert cards for rain, heatwave, and humidity
+- **Farming Impact:** Recommends when to irrigate or spray pesticides based on forecast
+
+### 📊 Agri-Finance & Profit Calculator
+
+- **Loan Eligibility:** Checks return on investment (ROI) for bank loans
+- **Profit Report:** Estimates total production and net income based on land size
+- **Cost Analysis:** Deducts estimated input costs to project real profits
+
+### 📲 Smart SMS Alert System
+
+- **Integrated:** Real-time SMS notifications via Twilio
+- **Price Alerts:** Notifies farmers when market prices are favorable
+- **Weather Warnings:** Sends critical disaster alerts directly to phones
 
 ## 🎨 User Interface
 
 - **Bilingual Design:** Full Bengali (বাংলা) language support with English backend
 - **Beautiful Gradient Theme:** Purple-themed professional dashboard
-- **Responsive Layout:** Works seamlessly on desktop and mobile
+- **Responsive Dual-Menu:** Sidebar for PC, expandable Top-Menu for Mobile
+- **Progressive Web App (PWA):** Installable on mobile with native app-like experience (Hidden headers/footers)
+- **High Contrast UI:** Specialized color modes for outdoor visibility
 - **Interactive Charts:** Plotly-powered visualizations
 - **Accessible Design:** Clean interface suitable for farmers with varying tech literacy
 
@@ -78,6 +99,15 @@ Due to the lack of granular historical agricultural data for Bangladesh availabl
   - Soil analysis data (pH, nutrients, organic matter)
   - Water usage patterns
 
+### 📚 Datasets & ML Training - Crop Disease Detection
+
+To ensure **state-of-the-art accuracy (99.2%)** in disease detection for farmers, we utilized premium open-source datasets:
+
+1.  **[Plant Village Dataset](https://www.kaggle.com/datasets/emmarex/plantdisease)** (Main Source)
+2.  **[New Plant Diseases Dataset](https://www.kaggle.com/datasets/vipoooool/new-plant-diseases-dataset/data)** (Fine Tuning)
+
+The model is trained using a EfficientNet architecture to handle complex leaf patterns and varied lighting conditions in the field.
+
 ### Future Data Collection Plan
 
 To enhance **accuracy and real-world performance**, our roadmap includes:
@@ -97,8 +127,8 @@ To enhance **accuracy and real-world performance**, our roadmap includes:
 1. Clone the repository:
 
 ```bash
-git clone https://github.com/NawrizTurjo/Agri-Price-Pred-millionX.git
-cd Agri-Price-Pred-millionX
+git clone https://github.com/NawrizTurjo/MXB2026-Dhaka-Trio-Leveling-AgriSmartBD.git
+cd MXB2026-Dhaka-Trio-Leveling-AgriSmartBD
 ```
 
 2. Create a virtual environment:
@@ -129,6 +159,8 @@ The app will open in your browser at `http://localhost:8501`
 ```
 Agri-Price-Pred-millionX/
 ├── app.py                          # Main Streamlit application with 3 modules
+├── plant-disease-classification-99-2.ipynb # ML Training Notebook (99.2% Accuracy)
+├── plant-disease-model-complete.pth # Trained Pytorch Model Weights
 ├── convert.py                      # Data conversion script (India → Bangladesh)
 ├── requirements.txt                # Python dependencies
 ├── bd_crop_price_data.csv          # Bangladesh crop price data (converted)
@@ -199,8 +231,6 @@ Our goal is to help Bangladesh achieve **10x agricultural productivity growth** 
 
 ### Phase 3: Advanced Features (Q3-Q4 2026)
 
-- **Weather Integration:** Combine weather forecasts with price predictions
-- **Crop Disease Detection:** AI-powered image recognition for plant health
 - **Supply Chain Tracking:** Farm-to-consumer transparency
 - **Cooperative Formation:** Tools for farmers to organize and negotiate collectively
 
@@ -256,8 +286,9 @@ We welcome contributions! If you'd like to improve this project:
 **For inquiries, partnerships, or data contributions:**
 
 - 📧 Email: [Contact through GitHub Issues]
-- 🌐 Live Demo: [https://agribangla.streamlit.app/](https://agribangla.streamlit.app/)
-- 💻 Repository: [GitHub - MXB2026-Dhaka-Trio-Leveling-AgriSmartBD](https://github.com/Your-Tribal-Chief/MXB2026-Dhaka-Trio-Leveling-AgriSmartBD/)
+- 🌐 Live Demo: [Click here to run the app](https://mxb2026-dhaka-trio-leveling-agrismartbd-g4hhxqjg5dnfhzdjtl9upa.streamlit.app)
+- 📱 Mobile Compatible PWA version: [https://agri-smart-bd-trio-leveling.netlify.app/](https://agri-smart-bd-trio-leveling.netlify.app/)
+- 💻 Repository: [GitHub - MXB2026-Dhaka-Trio-Leveling-AgriSmartBD](https://github.com/NawrizTurjo/MXB2026-Dhaka-Trio-Leveling-AgriSmartBD)
 
 ---
 
