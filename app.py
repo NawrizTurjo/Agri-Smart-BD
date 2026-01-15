@@ -417,6 +417,47 @@ def get_weather_data(city, api_key):
     except Exception as e:
         return None
 
+@st.cache_data(ttl=3600)
+def get_weather_forecast(city, api_key):
+    """Fetch 5-day weather forecast"""
+    if not api_key: return None
+    
+    API_CITY_MAPPING = {
+        'Cumilla': 'Comilla', 'Chattogram': 'Chittagong', 'Barishal': 'Barisal',
+        'Jashore': 'Jessore', 'Bogura': 'Bogra'
+    }
+    search_city = API_CITY_MAPPING.get(city, city)
+    
+    try:
+        url = f"http://api.openweathermap.org/data/2.5/forecast?q={search_city},BD&appid={api_key}&units=metric"
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            return response.json()
+        return None
+    except Exception:
+        return None
+
+# --- WEATHER & FORECAST HELPERS (COORDINATES BASED) ---
+@st.cache_data(ttl=3600)
+def get_weather_by_coords(lat, lon, api_key):
+    """Fetch current weather using Pin-Point Coordinates"""
+    try:
+        url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={api_key}&units=metric"
+        response = requests.get(url, timeout=5)
+        return response.json() if response.status_code == 200 else None
+    except:
+        return None
+
+@st.cache_data(ttl=3600)
+def get_forecast_by_coords(lat, lon, api_key):
+    """Fetch 5-day forecast to check rain probability for tomorrow"""
+    try:
+        url = f"https://api.openweathermap.org/data/2.5/forecast?lat={lat}&lon={lon}&appid={api_key}&units=metric"
+        response = requests.get(url, timeout=5)
+        return response.json() if response.status_code == 200 else None
+    except:
+        return None
+
 # --- Gemini API Helper ---
 def get_gemini_analysis(image, predicted_class, confidence, api_key):
     """
@@ -589,58 +630,276 @@ DISEASE_TRANSLATION = {
 }
 
 
-# Simple remedy suggestions (static dict - expand with real data)
-REMEDIES = {
-    'Apple___Apple_scab': 'আক্রান্ত পাতা অপসারণ করুন এবং ছত্রাকনাশক স্প্রে করুন।',
-    'Apple___Black_rot': 'সংক্রমিত ফল ও ডাল কেটে ফেলুন এবং বাগান পরিষ্কার রাখুন।',
-    'Apple___Cedar_apple_rust': 'ছত্রাকনাশক ব্যবহার করুন ও কাছাকাছি জুনিপার গাছ সরান।',
-    'Apple___healthy': 'নিয়মিত পরিচর্যা ও সঠিক সার ব্যবহার চালিয়ে যান।',
+# AI Doctor Prescription Map (Actionable Advice)
+CROP_PRESCRIPTION_MAP = {
 
-    'Blueberry___healthy': 'কোন রোগ নেই, নিয়মিত সেচ ও সার প্রয়োগ করুন।',
+    # ================= APPLE =================
+    'Apple___Apple_scab': {
+        "cause": "Venturia inaequalis ছত্রাক",
+        "solution": "আক্রান্ত পাতা ও ফল অপসারণ করুন। বাগান পরিষ্কার রাখুন।",
+        "medicine": "Score 250 EC / Dithane M-45",
+        "dosage": "প্রতি লিটার পানিতে ০.৫ মিলি Score অথবা ২ গ্রাম Dithane মিশিয়ে স্প্রে করুন।"
+    },
+    'Apple___Black_rot': {
+        "cause": "Botryosphaeria ছত্রাক",
+        "solution": "সংক্রমিত ডাল ও ফল কেটে পুড়িয়ে ফেলুন।",
+        "medicine": "Copper Fungicide",
+        "dosage": "২ গ্রাম প্রতি লিটার পানিতে মিশিয়ে স্প্রে করুন।"
+    },
+    'Apple___Cedar_apple_rust': {
+        "cause": "Gymnosporangium ছত্রাক",
+        "solution": "কাছাকাছি জুনিপার গাছ সরান।",
+        "medicine": "Bayleton 25 WP",
+        "dosage": "১ গ্রাম প্রতি লিটার পানিতে মিশিয়ে স্প্রে করুন।"
+    },
+    'Apple___healthy': {
+        "cause": "কোন রোগ নেই",
+        "solution": "নিয়মিত সার ও সেচ বজায় রাখুন।",
+        "medicine": "প্রযোজ্য নয়",
+        "dosage": "-"
+    },
 
-    'Cherry_(including_sour)___Powdery_mildew': 'সালফার বা উপযুক্ত ছত্রাকনাশক প্রয়োগ করুন।',
-    'Cherry_(including_sour)___healthy': 'গাছ সুস্থ, পর্যাপ্ত আলো ও বাতাস নিশ্চিত করুন।',
+    # ================= BLUEBERRY =================
+    'Blueberry___healthy': {
+        "cause": "কোন রোগ নেই",
+        "solution": "সঠিক pH ও সেচ বজায় রাখুন।",
+        "medicine": "প্রযোজ্য নয়",
+        "dosage": "-"
+    },
 
-    'Corn_(maize)___Cercospora_leaf_spot Gray_leaf_spot': 'আক্রান্ত পাতা সরিয়ে ফেলুন ও ছত্রাকনাশক দিন।',
-    'Corn_(maize)___Common_rust_': 'রোগ সহনশীল জাত ব্যবহার করুন ও প্রয়োজন হলে স্প্রে করুন।',
-    'Corn_(maize)___Northern_Leaf_Blight': 'ফসল পর্যায় পরিবর্তন করুন ও ছত্রাকনাশক ব্যবহার করুন।',
-    'Corn_(maize)___healthy': 'ভুট্টা গাছ ভালো অবস্থায় আছে।',
+    # ================= CHERRY =================
+    'Cherry_(including_sour)___Powdery_mildew': {
+        "cause": "Podosphaera ছত্রাক",
+        "solution": "আলো ও বাতাস চলাচল নিশ্চিত করুন।",
+        "medicine": "Sulphur Fungicide",
+        "dosage": "২ গ্রাম প্রতি লিটার পানিতে মিশিয়ে স্প্রে করুন।"
+    },
+    'Cherry_(including_sour)___healthy': {
+        "cause": "কোন রোগ নেই",
+        "solution": "গাছ সুস্থ আছে।",
+        "medicine": "প্রযোজ্য নয়",
+        "dosage": "-"
+    },
 
-    'Grape___Black_rot': 'আক্রান্ত অংশ কেটে ফেলুন ও ছত্রাকনাশক স্প্রে করুন।',
-    'Grape___Esca_(Black_Measles)': 'গুরুতর হলে আক্রান্ত গাছ অপসারণ করুন।',
-    'Grape___Leaf_blight_(Isariopsis_Leaf_Spot)': 'পাতা পরিষ্কার রাখুন ও ছত্রাকনাশক দিন।',
-    'Grape___healthy': 'আঙ্গুর গাছ সুস্থ রয়েছে।',
+    # ================= CORN =================
+    'Corn_(maize)___Cercospora_leaf_spot Gray_leaf_spot': {
+        "cause": "Cercospora ছত্রাক",
+        "solution": "ফসল পর্যায়ক্রম অনুসরণ করুন।",
+        "medicine": "Tilt 250 EC",
+        "dosage": "০.৫ মিলি প্রতি লিটার পানিতে স্প্রে করুন।"
+    },
+    'Corn_(maize)___Common_rust_': {
+        "cause": "Puccinia sorghi ছত্রাক",
+        "solution": "রোগ সহনশীল জাত ব্যবহার করুন।",
+        "medicine": "Score 250 EC",
+        "dosage": "০.৫ মিলি প্রতি লিটার পানিতে স্প্রে করুন।"
+    },
+    'Corn_(maize)___Northern_Leaf_Blight': {
+        "cause": "Exserohilum turcicum ছত্রাক",
+        "solution": "পরিষ্কার বীজ ব্যবহার করুন।",
+        "medicine": "Tilt 250 EC",
+        "dosage": "০.৫ মিলি প্রতি লিটার পানিতে স্প্রে করুন।"
+    },
+    'Corn_(maize)___healthy': {
+        "cause": "কোন রোগ নেই",
+        "solution": "ভুট্টা গাছ সুস্থ।",
+        "medicine": "প্রযোজ্য নয়",
+        "dosage": "-"
+    },
 
-    'Orange___Haunglongbing_(Citrus_greening)': 'আক্রান্ত গাছ অপসারণ করুন ও পোকা নিয়ন্ত্রণ করুন।',
+    # ================= GRAPE =================
+    'Grape___Black_rot': {
+        "cause": "Guignardia bidwellii ছত্রাক",
+        "solution": "আক্রান্ত অংশ কেটে ফেলুন।",
+        "medicine": "Dithane M-45",
+        "dosage": "২ গ্রাম প্রতি লিটার পানিতে স্প্রে করুন।"
+    },
+    'Grape___Esca_(Black_Measles)': {
+        "cause": "ছত্রাকজনিত জটিল রোগ",
+        "solution": "গুরুতর হলে গাছ অপসারণ করুন।",
+        "medicine": "কার্যকর চিকিৎসা নেই",
+        "dosage": "-"
+    },
+    'Grape___Leaf_blight_(Isariopsis_Leaf_Spot)': {
+        "cause": "Isariopsis ছত্রাক",
+        "solution": "পাতা পরিষ্কার রাখুন।",
+        "medicine": "Copper Fungicide",
+        "dosage": "২ গ্রাম প্রতি লিটার পানিতে স্প্রে করুন।"
+    },
+    'Grape___healthy': {
+        "cause": "কোন রোগ নেই",
+        "solution": "গাছ সুস্থ।",
+        "medicine": "প্রযোজ্য নয়",
+        "dosage": "-"
+    },
 
-    'Peach___Bacterial_spot': 'কপার-ভিত্তিক ব্যাকটেরিয়ানাশক ব্যবহার করুন।',
-    'Peach___healthy': 'গাছ সুস্থ, পরিচর্যা বজায় রাখুন।',
+    # ================= ORANGE =================
+    'Orange___Haunglongbing_(Citrus_greening)': {
+        "cause": "ব্যাকটেরিয়া (Candidatus Liberibacter)",
+        "solution": "আক্রান্ত গাছ অপসারণ করুন।",
+        "medicine": "Imidacloprid",
+        "dosage": "০.৫ মিলি প্রতি লিটার পানিতে স্প্রে করুন।"
+    },
 
-    'Pepper,_bell___Bacterial_spot': 'আক্রান্ত পাতা সরান ও ব্যাকটেরিয়ানাশক দিন।',
-    'Pepper,_bell___healthy': 'ক্যাপসিকাম গাছ ভালো আছে।',
+    # ================= PEACH =================
+    'Peach___Bacterial_spot': {
+        "cause": "Xanthomonas ব্যাকটেরিয়া",
+        "solution": "বৃষ্টিতে স্প্রে এড়িয়ে চলুন।",
+        "medicine": "Copper Oxychloride",
+        "dosage": "২ গ্রাম প্রতি লিটার পানিতে স্প্রে করুন।"
+    },
+    'Peach___healthy': {
+        "cause": "কোন রোগ নেই",
+        "solution": "গাছ সুস্থ।",
+        "medicine": "প্রযোজ্য নয়",
+        "dosage": "-"
+    },
 
-    'Potato___Early_blight': 'ফসল পর্যায় পরিবর্তন ও ছত্রাকনাশক ব্যবহার করুন।',
-    'Potato___Late_blight': 'দ্রুত ছত্রাকনাশক স্প্রে করুন ও আক্রান্ত অংশ সরান।',
-    'Potato___healthy': 'আলু গাছ সুস্থ রয়েছে।',
+    # ================= PEPPER =================
+    'Pepper,_bell___Bacterial_spot': {
+        "cause": "Xanthomonas ব্যাকটেরিয়া",
+        "solution": "পাতায় পানি জমতে দেবেন না।",
+        "medicine": "Kocide 3000",
+        "dosage": "২.৫ গ্রাম প্রতি লিটার পানিতে স্প্রে করুন।"
+    },
+    'Pepper,_bell___healthy': {
+        "cause": "কোন রোগ নেই",
+        "solution": "গাছ ভালো আছে।",
+        "medicine": "প্রযোজ্য নয়",
+        "dosage": "-"
+    },
 
-    'Raspberry___healthy': 'কোন সমস্যা নেই।',
-    'Soybean___healthy': 'সয়াবিন গাছ সুস্থ।',
+    # ================= RASPBERRY =================
+    'Raspberry___healthy': {
+        "cause": "কোন রোগ নেই",
+        "solution": "নিয়মিত পরিচর্যা চালিয়ে যান।",
+        "medicine": "প্রযোজ্য নয়",
+        "dosage": "-"
+    },
 
-    'Squash___Powdery_mildew': 'সালফার স্প্রে ও বাতাস চলাচল নিশ্চিত করুন।',
+    # ================= SOYBEAN =================
+    'Soybean___healthy': {
+        "cause": "কোন রোগ নেই",
+        "solution": "সয়াবিন গাছ সুস্থ।",
+        "medicine": "প্রযোজ্য নয়",
+        "dosage": "-"
+    },
 
-    'Strawberry___Leaf_scorch': 'আক্রান্ত পাতা সরিয়ে ফেলুন।',
-    'Strawberry___healthy': 'স্ট্রবেরি গাছ সুস্থ।',
+    # ================= SQUASH =================
+    'Squash___Powdery_mildew': {
+        "cause": "Erysiphe ছত্রাক",
+        "solution": "বাতাস চলাচল নিশ্চিত করুন।",
+        "medicine": "Sulphur",
+        "dosage": "২ গ্রাম প্রতি লিটার পানিতে স্প্রে করুন।"
+    },
 
-    'Tomato___Bacterial_spot': 'কপার স্প্রে ব্যবহার করুন।',
-    'Tomato___Early_blight': 'ছত্রাকনাশক প্রয়োগ করুন।',
-    'Tomato___Late_blight': 'আক্রান্ত গাছ দ্রুত অপসারণ করুন।',
-    'Tomato___Leaf_Mold': 'গ্রিনহাউসে বাতাস চলাচল বাড়ান।',
-    'Tomato___Septoria_leaf_spot': 'পাতা শুকনো রাখুন ও স্প্রে করুন।',
-    'Tomato___Spider_mites Two-spotted_spider_mite': 'জৈব কীটনাশক বা পানি স্প্রে করুন।',
-    'Tomato___Target_Spot': 'ছত্রাকনাশক প্রয়োগ করুন।',
-    'Tomato___Tomato_Yellow_Leaf_Curl_Virus': 'সাদা মাছি নিয়ন্ত্রণ করুন।',
-    'Tomato___Tomato_mosaic_virus': 'আক্রান্ত গাছ সরিয়ে ফেলুন।',
-    'Tomato___healthy': 'টমেটো গাছ সুস্থ রয়েছে।'
+    # ================= STRAWBERRY =================
+    'Strawberry___Leaf_scorch': {
+        "cause": "Diplocarpon ছত্রাক",
+        "solution": "আক্রান্ত পাতা সরিয়ে ফেলুন।",
+        "medicine": "Dithane M-45",
+        "dosage": "২ গ্রাম প্রতি লিটার পানিতে স্প্রে করুন।"
+    },
+    'Strawberry___healthy': {
+        "cause": "কোন রোগ নেই",
+        "solution": "গাছ সুস্থ।",
+        "medicine": "প্রযোজ্য নয়",
+        "dosage": "-"
+    },
+
+    # ================= TOMATO (remaining) =================
+    'Tomato___Septoria_leaf_spot': {
+        "cause": "Septoria lycopersici ছত্রাক",
+        "solution": "পাতা শুকনো রাখুন।",
+        "medicine": "Score 250 EC",
+        "dosage": "০.৫ মিলি প্রতি লিটার পানিতে স্প্রে করুন।"
+    },
+    'Tomato___Spider_mites Two-spotted_spider_mite': {
+        "cause": "মাকড় জাতীয় পোকা",
+        "solution": "পাতার নিচে পানি স্প্রে করুন।",
+        "medicine": "Vertimec",
+        "dosage": "০.৫ মিলি প্রতি লিটার পানিতে স্প্রে করুন।"
+    },
+    'Tomato___Target_Spot': {
+        "cause": "Corynespora ছত্রাক",
+        "solution": "পরিষ্কার চাষাবাদ বজায় রাখুন।",
+        "medicine": "Nativo 75 WG",
+        "dosage": "০.৬ গ্রাম প্রতি লিটার পানিতে স্প্রে করুন।"
+    },
+    'Tomato___Tomato_Yellow_Leaf_Curl_Virus': {
+        "cause": "ভাইরাস (Whitefly বাহক)",
+        "solution": "সাদা মাছি নিয়ন্ত্রণ করুন।",
+        "medicine": "Imidacloprid",
+        "dosage": "০.৫ মিলি প্রতি লিটার পানিতে স্প্রে করুন।"
+    },
+    'Tomato___Tomato_mosaic_virus': {
+        "cause": "ভাইরাস",
+        "solution": "আক্রান্ত গাছ অপসারণ করুন।",
+        "medicine": "কার্যকর ওষুধ নেই",
+        "dosage": "-"
+    },
+    'Tomato___healthy': {
+        "cause": "কোন রোগ নেই",
+        "solution": "টমেটো গাছ সুস্থ।",
+        "medicine": "প্রযোজ্য নয়",
+        "dosage": "-"
+    },
+
+    # ================= POTATO =================
+    'Potato___Early_blight': {
+        "cause": "Alternaria solani ছত্রাক",
+        "solution": "আক্রান্ত পাতা সংগ্রহ করে নষ্ট করুন। ফসল পর্যায়ক্রম অনুসরণ করুন।",
+        "medicine": "Dithane M-45 / Amistar Top",
+        "dosage": "প্রতি লিটার পানিতে ২ গ্রাম Dithane অথবা ১ মিলি Amistar Top মিশিয়ে স্প্রে করুন।"
+    },
+    'Potato___Late_blight': {
+        "cause": "Phytophthora infestans ছত্রাক",
+        "solution": "স্যাঁতস্যাঁতে আবহাওয়ায় আগাম সতর্কতা নিন। আক্রান্ত গাছ সরিয়ে ফেলুন।",
+        "medicine": "Secure 600 WG / Ridomil Gold",
+        "dosage": "২ গ্রাম প্রতি লিটার পানিতে মিশিয়ে ৫–৭ দিন পর পর স্প্রে করুন।"
+    },
+    'Potato___healthy': {
+        "cause": "কোন রোগ নেই",
+        "solution": "আলু গাছ সুস্থ। নিয়মিত পরিচর্যা বজায় রাখুন।",
+        "medicine": "প্রযোজ্য নয়",
+        "dosage": "-"
+    },
+
+    # ================= TOMATO (missing core ones) =================
+    'Tomato___Early_blight': {
+        "cause": "Alternaria solani ছত্রাক",
+        "solution": "আক্রান্ত পাতা অপসারণ করুন। ফসল পর্যায়ক্রম অনুসরণ করুন।",
+        "medicine": "Score 250 EC / Dithane M-45",
+        "dosage": "০.৫ মিলি Score অথবা ২ গ্রাম Dithane প্রতি লিটার পানিতে মিশিয়ে স্প্রে করুন।"
+    },
+    'Tomato___Late_blight': {
+        "cause": "Phytophthora infestans ছত্রাক",
+        "solution": "আর্দ্র আবহাওয়ায় দ্রুত ব্যবস্থা নিন। আক্রান্ত গাছ সরান।",
+        "medicine": "Acrobat MZ / Dithane M-45",
+        "dosage": "২ গ্রাম প্রতি লিটার পানিতে মিশিয়ে স্প্রে করুন।"
+    },
+    'Tomato___Bacterial_spot': {
+        "cause": "Xanthomonas ব্যাকটেরিয়া",
+        "solution": "পাতায় পানি জমতে দেবেন না। পরিষ্কার বীজ ব্যবহার করুন।",
+        "medicine": "Kocide 3000 / Copper Oxychloride",
+        "dosage": "২–২.৫ গ্রাম প্রতি লিটার পানিতে মিশিয়ে স্প্রে করুন।"
+    },
+    'Tomato___Leaf_Mold': {
+        "cause": "Passalora fulva ছত্রাক",
+        "solution": "গ্রিনহাউস বা জমিতে বাতাস চলাচল বাড়ান।",
+        "medicine": "Nativo 75 WG",
+        "dosage": "০.৬ গ্রাম প্রতি লিটার পানিতে মিশিয়ে বিকেলে স্প্রে করুন।"
+    }
+
+}
+
+
+# Fallback Generic Remedies
+GENERIC_REMEDIES = {
+    'healthy': "আপনার ফসল সুস্থ ও সবল আছে। নিয়মিত পরিচর্যা ও পর্যবেক্ষণ চালিয়ে যান।",
+    'fungal': "ম্যানকোজেব জাতীয় ছত্রাকনাশক (যেমন: Dithane M-45) ২ গ্রাম/লিটার হারে স্প্রে করুন।",
+    'bacterial': "কপার অক্সিক্লোরাইড জাতীয় বালাইনাশক ব্যবহার করুন।",
+    'viral': "ভাইরাস আক্রান্ত গাছ তুলে মাটিতে পুঁতে ফেলুন এবং বাহক পোকা দমনে ইমিডাক্লোপ্রিড স্প্রে করুন।"
 }
 
 # Advanced Crop Preferences for Dynamic Reasoning
@@ -1095,7 +1354,7 @@ def get_crop_reasoning(soil_record, crop, yield_val):
 
 # --- Sidebar ---
 st.sidebar.markdown("**এআই চালিত কৃষি বুদ্ধিমত্তা**")
-menu = st.sidebar.radio("মডিউল নির্বাচন করুন:", ["📊 মূল্য পূর্বাভাস (এআই)", "💰 সেরা বাজার খুঁজুন", "🌱 মাটি ও ফসল পরামর্শদাতা", "🦠 ফসল বিষাক্তি পরিচিতি"])
+menu = st.sidebar.radio("মডিউল নির্বাচন করুন:", ["📊 মূল্য পূর্বাভাস (এআই)", "💰 সেরা বাজার খুঁজুন", "🌱 মাটি ও ফসল পরামর্শদাতা", "🦠 ফসল বিষাক্তি পরিচিতি", "📊 এগ্রি-ফাইন্যান্স ও লাভ রিপোর্ট"])
 
 # -----------------------------------------------------------------------------
 # MODULE 1: AI PRICE FORECASTING
@@ -1103,6 +1362,52 @@ menu = st.sidebar.radio("মডিউল নির্বাচন করুন:"
 if menu == "📊 মূল্য পূর্বাভাস (এআই)":
     st.markdown("### মেশিন লার্নিং ব্যবহার করে ৩০ দিনের আগাম মূল্যের পূর্বাভাস।")
     
+    # --- GEOLOCATION & PIN-POINT WEATHER SECTION ---
+    
+    # Session Variables for Location
+    if 'user_lat' not in st.session_state: st.session_state.user_lat = None
+    if 'user_lon' not in st.session_state: st.session_state.user_lon = None
+    if 'detected_city' not in st.session_state: st.session_state.detected_city = "Unknown Location"
+
+    # Geolocation Button
+    c_geo1, c_geo2 = st.columns([1, 3])
+    with c_geo1:
+        if st.button("📍 আমার বর্তমান অবস্থান ব্যবহার করুন"):
+            st.session_state.finding_location = True
+    
+    if st.session_state.get('finding_location', False):
+        with st.spinner("GPS অবস্থান নির্ণয় করা হচ্ছে (অনুগ্রহ করে অনুমতি দিন)..."):
+            try:
+                # Use HTML5 Geolocation API for Pin-point accuracy
+                # Fix: explicit JSON for success, and explicit payload for error.
+                loc_data = streamlit_js_eval(
+                    js_expressions='new Promise((resolve) => navigator.geolocation.getCurrentPosition(p => resolve({coords: {latitude: p.coords.latitude, longitude: p.coords.longitude}}), e => resolve({error: true})))', 
+                    key='geo_gps_fetch'
+                )
+                
+                if loc_data:
+                    if 'coords' in loc_data:
+                        lat = loc_data['coords']['latitude']
+                        lon = loc_data['coords']['longitude']
+                        
+                        st.session_state.user_lat = float(lat)
+                        st.session_state.user_lon = float(lon)
+                        st.session_state.detected_city = "আপনার অবস্থান" 
+                        st.success("✅ অবস্থান শনাক্ত হয়েছে!")
+                        st.session_state.finding_location = False
+                        time.sleep(1)
+                        st.rerun()
+                    elif 'error' in loc_data:
+                         st.warning("⚠️ GPS অনুমতি পাওয়া যায়নি বা সমস্যা হয়েছে।")
+                         st.session_state.finding_location = False
+                else:
+                    # loc_data is None -> JS is still executing or not ready. Do nothing.
+                    pass
+            except Exception as e:
+                st.error("অবস্থান নির্ণয়ে সমস্যা হয়েছে।")
+                st.session_state.finding_location = False
+
+    # --- DISTRICT & SESSION SETUP ---
     # Auto-select district if logged in
     district_list = sorted(price_df['District_Name'].unique())
     district_display = {dist: translate_bn(dist, district_translation) for dist in district_list}
@@ -1119,6 +1424,130 @@ if menu == "📊 মূল্য পূর্বাভাস (এআই)":
                 st.session_state.selected_district_val = district_options_list[0]
         else:
             st.session_state.selected_district_val = district_options_list[0]
+
+    # --- REAL-TIME WEATHER ALERT LOGIC ---
+    weather_api_key = st.secrets.get("WEATHER_API_KEY") or os.getenv("WEATHER_API_KEY")
+    
+    current_w = None
+    forecast_w = None
+    location_label = ""
+    is_gps = False
+    
+    # 1. Try GPS Location
+    if st.session_state.user_lat and st.session_state.user_lon and weather_api_key:
+        lat = st.session_state.user_lat
+        lon = st.session_state.user_lon
+        current_w = get_weather_by_coords(lat, lon, weather_api_key)
+        forecast_w = get_forecast_by_coords(lat, lon, weather_api_key)
+        
+        # Use city name from API if available
+        api_city = current_w.get('name') if current_w else None
+        display_city = api_city if api_city else st.session_state.detected_city
+        location_label = f"{display_city} (GPS)"
+        is_gps = True
+        
+    # 2. Fallback to Selected District
+    elif weather_api_key and 'selected_district_val' in st.session_state:
+        # Get English name
+        dist_bn = st.session_state.selected_district_val
+        # Find key by value
+        dist_eng = [k for k, v in district_display.items() if v == dist_bn]
+        if dist_eng:
+            search_city = dist_eng[0]
+            current_w = get_weather_data(search_city, weather_api_key)
+            forecast_w = get_weather_forecast(search_city, weather_api_key)
+            location_label = f"{dist_bn} (District)"
+            
+    # 3. Process & Display Weather
+    if current_w:
+        # Current Data
+        temp = current_w['main']['temp']
+        humidity = current_w['main']['humidity']
+        desc = current_w['weather'][0]['description'].title()
+        icon = current_w['weather'][0]['icon']
+            
+        # Analyze Forecast
+        rain_prob = 0
+        is_rain_likely = False
+            
+        if forecast_w:
+            for item in forecast_w['list'][:8]:
+                pop = item.get('pop', 0)
+                if pop > 0.7:
+                    is_rain_likely = True
+                    rain_prob = int(pop * 100)
+                    break
+            
+        # Generate Advisory
+        alert_color = "#4caf50" # Green
+        alert_msg = "✅ আবহাওয়া চাষাবাদের জন্য অনুকূল।"
+            
+        if is_rain_likely:
+            alert_color = "#ff4b4b" # Red
+            alert_msg = f"⚠️ **সতর্কতা:** আগামী ২৪ ঘন্টায় বৃষ্টির সম্ভাবনা {rain_prob}%। জমিতে সার বা কীটনাশক দেবেন না।"
+        elif temp > 36:
+            alert_color = "#ffa726" # Orange
+            alert_msg = "☀️ **তাপপ্রবাহ:** অতিরিক্ত তাপমাত্রা। ফসলে সেচ নিশ্চিত করুন।"
+            
+        # Extract additional details
+        feels_like = current_w['main']['feels_like']
+        wind_speed = current_w['wind']['speed']
+        pressure = current_w['main']['pressure']
+
+        # Display Card with Expanded Info
+        st.markdown(f"""
+        <div style="background-color: #f8f9fa; border-radius: 12px; padding: 15px; border: 1px solid #ddd; margin-bottom: 20px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
+                <div style="display: flex; align-items: center; gap: 15px;">
+                    <img src="http://openweathermap.org/img/wn/{icon}@2x.png" width="70">
+                    <div>
+                        <h3 style="margin: 0; color: #333;">{temp:.1f}°C</h3>
+                        <p style="margin: 0; color: #666; font-size: 14px;">{desc} | অনুভূতি: {feels_like:.1f}°C</p>
+                        <p style="margin: 0; color: #666; font-size: 13px;">💧 আর্দ্রতা: {humidity}% | 🌬️ বাতাস: {wind_speed} m/s | 🌡️ চাপ: {pressure} hPa</p>
+                        <small style="color: #888;">📍 {location_label}</small>
+                    </div>
+                </div>
+                <div style="background-color: {alert_color}; color: white; padding: 10px 20px; border-radius: 8px; margin-top: 10px; text-align: right;">
+                    {alert_msg}
+                </div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+            
+        # Map (Only for GPS)
+        if is_gps:
+            st.markdown("**🗺️ আপনার জমির অবস্থান (OpenStreetMap):**")
+            map_data = pd.DataFrame({'lat': [st.session_state.user_lat], 'lon': [st.session_state.user_lon]})
+            st.map(map_data, zoom=12, use_container_width=True)
+            
+            # Auto-Sync GPS City to District Selection (One-time sync per GPS fetch)
+            if 'sync_done' not in st.session_state: st.session_state.sync_done = False
+            
+            # Use detected city from IP/weather data if available
+            detected_city_name = current_w.get('name', st.session_state.detected_city)
+            
+            if detected_city_name and not st.session_state.sync_done:
+                match_found_bn = None
+                
+                # Normalize for matching
+                search_name = detected_city_name.lower().strip()
+                
+                # Check 1: Direct/Case-insensitive matching with keys
+                for d_eng, d_bn in district_translation.items():
+                    if d_eng.lower() in search_name or search_name in d_eng.lower():
+                        match_found_bn = d_bn
+                        break
+                
+                # Update Session State if match found
+                if match_found_bn and 'selected_district_val' in st.session_state:
+                    if st.session_state.selected_district_val != match_found_bn:
+                        st.session_state.selected_district_val = match_found_bn
+                        st.session_state.sync_done = True # Prevent infinite loops
+                        st.toast(f"📍 জেলা স্বয়ংক্রিয়ভাবে নির্বাচিত: {match_found_bn}")
+                        time.sleep(0.5)
+                        st.rerun()
+
+
 
     # Voice Input
     c1, c2 = st.columns([1, 4])
@@ -1147,54 +1576,21 @@ if menu == "📊 মূল্য পূর্বাভাস (এআই)":
                     st.toast("⚠️ কোনো জেলা পাওয়া যায়নি", icon="⚠️")
                     st.session_state.last_voice_text = voice_text # Mark as processed even if failed
     
-    # Geolocation Button
-    # Geolocation Button (Client-Side for Deployed Apps)
-    if st.button("📍 আমার বর্তমান অবস্থান ব্যবহার করুন"):
-        st.session_state.finding_location = True
-    
-    if st.session_state.get('finding_location', False):
-        # execute js to get ip info from client side
-        with st.spinner("অবস্থান নির্ণয় করা হচ্ছে (Browser)..."):
-            loc_data = streamlit_js_eval(
-                js_expressions='fetch("https://ipinfo.io/json").then(response => response.json())', 
-                key = 'geo_fetch'
-            )
-            
-        if loc_data:
-            detected_city = loc_data.get('city', '').strip()
-            match_found_bn = None
-            
-            if detected_city:
-                 # 1. Direct key match
-                if detected_city in district_display:
-                    match_found_bn = district_display[detected_city]
-                else:
-                    # 2. Case-insensitive match
-                    for d_eng, d_bn in district_display.items():
-                        if d_eng.lower().strip() == detected_city.lower():
-                            match_found_bn = d_bn
-                            break
-            
-            if match_found_bn:
-                if match_found_bn in district_options_list:
-                    st.session_state.selected_district_val = match_found_bn
-                    st.toast(f"📍 আপনার অবস্থান শনাক্ত হয়েছে: {detected_city}")
-                    st.session_state.finding_location = False # Done
-                    time.sleep(0.5)
-                    st.rerun()
-                else:
-                    st.warning(f"⚠️ আপনার শহর ({detected_city}) আমাদের সেবার আওতাভুক্ত নয়।")
-                    st.session_state.finding_location = False
-            elif detected_city:
-                st.warning(f"⚠️ আপনার শহর ({detected_city}) ডেটাসেটে পাওয়া যায়নি।")
-                st.session_state.finding_location = False
+    # Legacy Geolocation logic removed
+
 
     st.divider()
 
     # Inputs
     col1, col2 = st.columns(2)
+    def reset_gps_state():
+        if 'user_lat' in st.session_state: st.session_state.user_lat = None
+        if 'user_lon' in st.session_state: st.session_state.user_lon = None
+        if 'sync_done' in st.session_state: st.session_state.sync_done = False # Reset sync flag
+
+        
     with col1:
-        selected_district_bn = st.selectbox("📍 জেলা নির্বাচন করুন", options=district_options_list, key='selected_district_val')
+        selected_district_bn = st.selectbox("📍 জেলা নির্বাচন করুন", options=district_options_list, key='selected_district_val', on_change=reset_gps_state)
         selected_district = [k for k, v in district_display.items() if v == selected_district_bn][0]
     
     with col2:
@@ -1224,37 +1620,56 @@ if menu == "📊 মূল্য পূর্বাভাস (এআই)":
     
     if weather_api_key:
         w_data = get_weather_data(selected_district, weather_api_key)
+        f_data = get_weather_forecast(selected_district, weather_api_key)
+        
         if w_data:
             main = w_data['main']
             weather_desc = w_data['weather'][0]['description']
             icon_code = w_data['weather'][0]['icon']
             weather_icon_url = f"http://openweathermap.org/img/wn/{icon_code}@2x.png"
             
-            # Simple Advisory Logic
-            if 'rain' in weather_desc.lower() or 'drizzle' in weather_desc.lower() or 'thunderstorm' in weather_desc.lower():
-                weather_advice = "🌧️ **সতর্কতা:** বৃষ্টির সম্ভাবনা। ফসল সংগ্রহ বা সার প্রয়োগ থেকে বিরত থাকুন।"
-            elif main['temp'] > 35:
-                weather_advice = "☀️ **সতর্কতা:** অতিরিক্ত তাপমাত্রা। জমিতে পর্যাপ্ত সেচ নিশ্চিত করুন।"
-            elif main['humidity'] > 85:
-                 weather_advice = "💧 **সতর্কতা:** উচ্চ আর্দ্রতা। ছত্রাকজনিত রোগের ঝুঁকি বেশি।"
-            else:
-                 weather_advice = "✅ আবহাওয়া চাষাবাদের অনুকূল।"
+            # --- DISASTER ALERT LOGIC (Feature 1) ---
+            alert_msg = ""
+            alert_color = "#e3f2fd" # Default blue
+            alert_icon = "✅"
+            show_red_alert = False
 
-            # Display Weather Compactly
-            st.markdown(f"""
-            <div style="background-color: #e3f2fd; padding: 15px; border-radius: 10px; display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px;">
-                <div style="display: flex; align-items: center;">
-                    <img src="{weather_icon_url}" width="60">
-                    <div style="margin-left: 10px;">
-                        <h4 style="margin: 0; color: #1565c0;">{translate_bn(selected_district, district_translation)} আবহাওয়া</h4>
-                        <p style="margin: 0; font-size: 16px;"><b>{main['temp']}°C</b> | {weather_desc.title()} | আর্দ্রতা: {main['humidity']}%</p>
-                    </div>
-                </div>
-                <div style="background-color: #fff; padding: 10px; border-radius: 8px; border-left: 4px solid #ff9800;">
-                    {weather_advice}
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+            # Check Forecast for Rain
+            rain_prob = 0
+            if f_data:
+                # Check next 24 hours (8 * 3hr intervals)
+                for item in f_data['list'][:8]:
+                    if 'rain' in item:
+                        # rain probability is not directly given in standard free API, 
+                        # but 'pop' (probability of precipitation) is available in 2.5/forecast
+                        pop = item.get('pop', 0)
+                        if pop > rain_prob: rain_prob = pop
+            
+            # Artificial Logic for Demo if 'pop' unavailable or 0 (remove in prod if needed)
+            if 'rain' in weather_desc.lower(): 
+                rain_prob = 0.8
+            
+            if rain_prob > 0.7:
+                show_red_alert = True
+                alert_msg = "⚠️ আগামীকাল বৃষ্টির সম্ভাবনা আছে, আজ সেচ বা সার দেওয়া থেকে বিরত থাকুন।"
+                alert_color = "#ffebee" # Red background
+                alert_icon = "⛈️"
+            elif main['temp'] > 35:
+                alert_msg = "☀️ সতর্কতা: অতিরিক্ত তাপমাত্রা। জমিতে পর্যাপ্ত সেচ নিশ্চিত করুন।"
+                alert_color = "#fff3e0" # Orange
+                alert_icon = "🔥"
+            elif main['humidity'] > 85:
+                 alert_msg = "💧 সতর্কতা: উচ্চ আর্দ্রতা। ছত্রাকজনিত রোগের ঝুঁকি বেশি।"
+                 alert_color = "#e0f2f1"
+                 alert_icon = "💧"
+            else:
+                 alert_msg = "✅ আবহাওয়া চাষাবাদের অনুকূল।"
+
+            # Display Weather Dashboard
+            # Display Weather Dashboard
+            # Legacy Weather UI removed/commented out as per user request to use the new card
+            # Keeping the variable selected_district for prediction logic below
+            pass
     
     # Analysis & Prediction
     filtered_df = price_df[(price_df['District_Name'] == selected_district) & (price_df['Crop_Name'] == selected_crop)].sort_values('Price_Date')
@@ -1554,13 +1969,13 @@ elif menu == "🦠 ফসল বিষাক্তি পরিচিতি":
 
         # Display Results
         bn_label = DISEASE_TRANSLATION.get(pred_class, pred_class)
-        remedy = REMEDIES.get(pred_class, "পরামর্শ: স্থানীয় কৃষি কর্মকর্তার সাথে যোগাযোগ করুন।")
         
         st.divider()
         st.subheader("ফলাফল:")
         
         # Result Badge
-        if "healthy" in pred_class:
+        is_healthy = "healthy" in pred_class.lower()
+        if is_healthy:
             st.success(f"✅ **অবস্থা:** {bn_label}")
         else:
             st.error(f"⚠️ **শনাক্ত রোগ:** {bn_label}")
@@ -1569,27 +1984,160 @@ elif menu == "🦠 ফসল বিষাক্তি পরিচিতি":
         st.write(f"**সঠিকতার হার:** {conf_score:.1f}%")
         st.progress(int(conf_score))
         
-        # --- GEMINI INTEGRATION ---
-        # gemini_api_key = st.secrets.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
+        # --- AI DOCTOR PRESCRIPTION (Feature 2) ---
+        st.markdown("### 💊 এআই কৃষি ডাক্তার (Digital Prescription)")
         
-        # if gemini_api_key:
-        #     with st.expander("🤖 এআই বিশেষজ্ঞের মতামত (Gemini 2.0)", expanded=True):
-        #         with st.spinner("Gemini চিত্র বিশ্লেষণ করছে..."):
-        #             gemini_response = get_gemini_analysis(image, pred_class, conf_score, gemini_api_key)
-        #             st.markdown(gemini_response)
+        prescription = CROP_PRESCRIPTION_MAP.get(pred_class)
         
-        # Remedy Section
-        with st.container():
+        if is_healthy:
+             st.info(GENERIC_REMEDIES['healthy'])
+        elif prescription:
+            # Structured Prescription Card
             st.markdown(f"""
-            <div style="background-color: #f0f2f6; padding: 20px; border-radius: 10px; border-left: 5px solid #ff4b4b;">
-                <h4 style="color: #31333F;">💡 পরামর্শ ও প্রতিকার</h4>
-                <p style="font-size: 16px;">{remedy}</p>
-            </div>
-            """, unsafe_allow_html=True)
+<div style="background-color: #f1f8e9; border: 2px solid #81c784; border-radius: 10px; padding: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+<h3 style="color: #2e7d32; margin-top: 0;">📋 ব্যবস্থাপত্র (Prescription)</h3>
+<hr>
+<div style="display: grid; grid-template-columns: 1fr; gap: 10px;">
+<div>
+<strong style="color: #e65100;">🔍 রোগের কারণ:</strong>
+<span style="color: #333;">{prescription['cause']}</span>
+</div>
+<div>
+<strong style="color: #1565c0;">🛡️ প্রতিকার/করণীয়:</strong>
+<span style="color: #333;">{prescription['solution']}</span>
+</div>
+<div>
+<strong style="color: #d32f2f;">💊 প্রস্তাবিত ঔষধ:</strong>
+<span style="font-weight: bold; color: #d32f2f; background-color: #ffebee; padding: 2px 8px; border-radius: 4px;">{prescription['medicine']}</span>
+</div>
+<div>
+<strong style="color: #43a047;">⚖️ মাত্রা (Dosage):</strong>
+<span style="color: #333;">{prescription['dosage']}</span>
+</div>
+</div>
+<div style="margin-top: 15px; font-size: 0.9em; color: #666; font-style: italic;">
+* ঔষধ ব্যবহারের পূর্বে বোতলের গায়ের নির্দেশাবলী ভালো করে পড়ুন এবং সুরক্ষা পোশাক পরিধান করুন।
+</div>
+</div>
+""", unsafe_allow_html=True)
+        else:
+            # Fallback for unconnected diseases
+            fallback_remedy = GENERIC_REMEDIES['bacterial'] if 'bacterial' in pred_class.lower() \
+                else (GENERIC_REMEDIES['viral'] if 'virus' in pred_class.lower() \
+                else GENERIC_REMEDIES['fungal'])
+            
+            st.warning(f"⚠️ নির্দিষ্ট প্রেসক্রিপশন ডেটাবেসে নেই। সাধারণ পরামর্শ: {fallback_remedy}")
+            
+        # Remedy Section (Legacy) removed in favor of AI Doctor
             
         # Disclaimer
         with st.expander("⚠️ দাবিত্যাগ (Disclaimer)"):
             st.write("এই এআই মডেলটি সহায়ক টুল হিসেবে তৈরি। এটি ৯৯.২% নির্ভুল হলেও, চূড়ান্ত সিদ্ধান্তের জন্য সর্বদা কৃষি বিশেষজ্ঞের পরামর্শ নিন।")
+
+# -----------------------------------------------------------------------------
+# MODULE 5: AGRI-FINANCE & PROFIT REPORT (Feature 3)
+# -----------------------------------------------------------------------------
+elif menu == "📊 এগ্রি-ফাইন্যান্স ও লাভ রিপোর্ট":
+    st.title("📊 এগ্রি-ফাইন্যান্স ও লাভ রিপোর্ট")
+    st.markdown("### চাষাবাদের সম্ভাব্য আয় ও লোনের যোগ্যতা যাচাই করুন")
+    st.divider()
+
+    # 1. Inputs
+    c1, c2 = st.columns(2)
+    
+    with c1:
+        # District Selection
+        district_list = sorted(price_df['District_Name'].unique())
+        district_display = {dist: translate_bn(dist, district_translation) for dist in district_list}
+        f_district_bn = st.selectbox("জেলা নির্বাচন করুন", options=list(district_display.values()), key="f_dist")
+        f_district = [k for k, v in district_display.items() if v == f_district_bn][0]
+        
+        # Crop Selection
+        all_crops = sorted(price_df['Crop_Name'].unique())
+        all_crops_display = {crop: translate_bn(crop, crop_translation) for crop in all_crops}
+        f_crop_bn = st.selectbox("ফসল নির্বাচন করুন", options=list(all_crops_display.values()), key="f_crop")
+        f_crop = [k for k, v in all_crops_display.items() if v == f_crop_bn][0]
+        
+        # Land Size
+        land_amount = st.number_input("জমির পরিমাণ (শতাংশ/ডেসিমেল)", min_value=1.0, value=33.0, step=1.0)
+    
+    with c2:
+        # Yield Estimation (Auto-fill based on data)
+        avg_yield = 0
+        crop_prod_data = prod_df[prod_df['Crop_Name'] == f_crop]
+        if not crop_prod_data.empty:
+            avg_yield = crop_prod_data['Yield_Quintals_per_Ha'].mean()
+        
+        # Convert Yield (Quintal/Hectare -> Kg/Decimal)
+        # 1 Hectare = 247 Decimal
+        # 1 Quintal = 100 kg
+        # Yield (kg/dec) = (Yield_Q_Ha * 100) / 247
+        default_yield_kg_dec = (avg_yield * 100) / 247 if avg_yield > 0 else 20.0
+        
+        expected_yield_per_dec = st.number_input("প্রত্যাশিত ফলন (কেজি/শতাংশ)", min_value=1.0, value=float(round(default_yield_kg_dec, 2)))
+        
+        # Price Estimation
+        # Get latest average price
+        latest_price_date = price_df['Price_Date'].max()
+        recent_prices = price_df[(price_df['Crop_Name'] == f_crop) & (price_df['Price_Date'] >= latest_price_date - datetime.timedelta(days=30))]
+        default_price = recent_prices['Price_Tk_kg'].mean() if not recent_prices.empty else 20.0
+        
+        estimated_price = st.number_input("সম্ভাব্য বিক্রয় মূল্য (টাকা/কেজি)", min_value=1.0, value=float(round(default_price, 2)))
+
+    # 2. Generate Report
+    if st.button("📄 রিপোর্ট তৈরি করুন", type="primary", use_container_width=True):
+        total_production = land_amount * expected_yield_per_dec
+        total_income = total_production * estimated_price
+        
+        # Cost Estimator (Rough Rule of Thumb: 40% of revenue is cost, usually higher but this is optimistic estimation for loan)
+        # Better: Use static cost per decimal for simplicity
+        estimated_cost = land_amount * 500 # Assuming 500 tk per decimal cost baseline
+        net_profit = total_income - estimated_cost
+        roi = (net_profit / estimated_cost) * 100 if estimated_cost > 0 else 0
+        
+        # Logic for Bank Loan Eligibility
+        # If ROI > 30% and Profit > 20000, Good candidate
+        loan_eligibility = "High" if roi > 30 and net_profit > 10000 else "Medium"
+        if net_profit < 0: loan_eligibility = "None"
+        
+        st.divider()
+        st.subheader("📋 এগ্রি-বিজনেস রিপোর্ট কার্ড")
+        
+        st.markdown(f"""
+<div style="background-color: white; padding: 25px; border-radius: 12px; border: 1px solid #ddd; box-shadow: 0 4px 15px rgba(0,0,0,0.1);">
+<div style="text-align: center; border-bottom: 2px solid #4CAF50; padding-bottom: 10px; margin-bottom: 20px;">
+<h2 style="color: #2E7D32; margin:0;">Agri-Business Projection</h2>
+<p style="color: #666;">Generated by Agri-Smart BD AI</p>
+</div>
+<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+<div>
+<p style="margin: 5px 0; color: #555;"><strong>জেলা:</strong> {f_district_bn}</p>
+<p style="margin: 5px 0; color: #555;"><strong>ফসল:</strong> {f_crop_bn}</p>
+<p style="margin: 5px 0; color: #555;"><strong>জমির পরিমাণ:</strong> {land_amount} শতাংশ</p>
+<p style="margin: 5px 0; color: #555;"><strong>মোট উৎপাদন:</strong> {int(total_production)} কেজি</p>
+</div>
+<div>
+<p style="margin: 5px 0; color: #555;"><strong>বাজার দর:</strong> ৳{estimated_price}/কেজি</p>
+<p style="margin: 5px 0; color: #555;"><strong>আনুমানিক খরচ:</strong> ৳{int(estimated_cost)}</p>
+</div>
+</div>
+<hr style="margin: 20px 0; border-top: 1px dashed #ccc;">
+<div style="background-color: #f1f8e9; padding: 15px; border-radius: 8px; text-align: center;">
+<h3 style="color: #1b5e20; margin: 0;">নিট মুনাফা (সম্ভাব্য)</h3>
+<h1 style="color: #2e7d32; font-size: 2.5em; margin: 10px 0;">৳ {to_bengali_number(f'{int(net_profit)}')}/=</h1>
+<p style="color: #33691e; font-weight: bold;">ROI: {roi:.1f}%</p>
+</div>
+<div style="margin-top: 20px; text-align: center;">
+<span style="background-color: {'#4CAF50' if loan_eligibility == 'High' else '#FF9800'}; color: white; padding: 8px 15px; border-radius: 20px; font-weight: bold;">
+ব্যাংক লোন যোগ্যতা: {loan_eligibility}
+</span>
+</div>
+</div>
+""", unsafe_allow_html=True)
+        
+        col_print, col_share = st.columns(2)
+        with col_print:
+            st.warning("🖨️ প্রিন্ট করতে 'Ctrl+P' চাপুন") 
 
 # Footer
 st.markdown("<br><hr><div style='text-align: center; color: #555;'>Agri-Smart BD | Built for AI Build-a-thon 2025</div>", unsafe_allow_html=True)
