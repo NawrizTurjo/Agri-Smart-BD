@@ -1941,9 +1941,9 @@ elif menu == "🦠 ফসল বিষাক্তি পরিচিতি":
             st.info("টিপস: ছবিটি উজ্জ্বল আলোতে তুলুন এবং ব্যাকগ্রাউন্ডে যেন পাতা থাকে তা নিশ্চিত করুন।")
             st.stop() # Stop further processing
 
-        with st.spinner("রোগ নির্ণয় করা হচ্ছে (EfficientNetB4)..."):
+        with st.spinner("রোগ নির্ণয় করা হচ্ছে..."):
             try:
-                # Preprocess for EfficientNetB4 (380x380)
+                # Preprocess for (380x380)
                 # 1. Resize
                 img_resized = ImageOps.fit(image, (380, 380), Image.Resampling.LANCZOS)
                 
@@ -1951,7 +1951,7 @@ elif menu == "🦠 ফসল বিষাক্তি পরিচিতি":
                 img_array = np.asarray(img_resized)
                 img_batch = np.expand_dims(img_array, axis=0)
                 
-                # 3. Preprocess Input (EfficientNet standard)
+                # 3. Preprocess Input (Standard)
                 img_preprocessed = preprocess_input(img_batch)
 
                 # Inference

@@ -1,0 +1,4 @@
+1. Main: Plant Village Dataset on Kaggle
+https://www.kaggle.com/datasets/emmarex/plantdisease
+2. Fine Tuned: New Plant Diseases Dataset on Kaggle
+https://www.kaggle.com/datasets/vipoooool/new-plant-diseases-dataset/data
